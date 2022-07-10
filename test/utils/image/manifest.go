@@ -142,9 +142,11 @@ const (
 	// CudaVectorAdd2 image
 	CudaVectorAdd2
 	// DebianIptables Image
-	DebianIptables
+	// DebianIptables
 	// EchoServer image
 	EchoServer
+	// DistrolessIptables Image
+	DistrolessIptables
 	// Etcd image
 	Etcd
 	// GlusterDynamicProvisioner image
@@ -212,9 +214,12 @@ func initImageConfigs() map[int]Config {
 	configs[CheckMetadataConcealment] = Config{promoterE2eRegistry, "metadata-concealment", "1.6"}
 	configs[CudaVectorAdd] = Config{e2eRegistry, "cuda-vector-add", "1.0"}
 	configs[CudaVectorAdd2] = Config{e2eRegistry, "cuda-vector-add", "2.0"}
-	configs[DebianIptables] = Config{buildImageRegistry, "debian-iptables", "buster-v1.6.7"}
+        // We are switching from DebianIptables to DistrolessIptables for kube-proxy
+	// configs[DebianIptables] = Config{buildImageRegistry, "debian-iptables", "buster-v1.6.7"}
+	configs[DistrolessIptables] = Config{buildImageRegistry, "distroless-iptables", "v0.1.1"}
 	configs[EchoServer] = Config{e2eRegistry, "echoserver", "2.2"}
-	configs[Etcd] = Config{gcRegistry, "etcd", "3.4.13-0"}
+	// configs[Etcd] = Config{gcRegistry, "etcd", "3.4.13-0"}
+	configs[Etcd] = Config{gcRegistry, "etcd", "3.4.25"}
 	configs[GlusterDynamicProvisioner] = Config{dockerGluster, "glusterdynamic-provisioner", "v1.0"}
 	configs[Httpd] = Config{dockerLibraryRegistry, "httpd", "2.4.38-alpine"}
 	configs[HttpdNew] = Config{dockerLibraryRegistry, "httpd", "2.4.39-alpine"}
@@ -228,6 +233,39 @@ func initImageConfigs() map[int]Config {
 	configs[NginxNew] = Config{dockerLibraryRegistry, "nginx", "1.15-alpine"}
 	configs[Nonewprivs] = Config{e2eRegistry, "nonewprivs", "1.0"}
 	configs[NonRoot] = Config{e2eRegistry, "nonroot", "1.0"}
+/*=
+======
+func initImageConfigs(list RegistryList) (map[ImageID]Config, map[ImageID]Config) {
+	configs := map[ImageID]Config{}
+	configs[Agnhost] = Config{list.PromoterE2eRegistry, "agnhost", "2.39"}
+	configs[AgnhostPrivate] = Config{list.PrivateRegistry, "agnhost", "2.6"}
+	configs[AuthenticatedAlpine] = Config{list.GcAuthenticatedRegistry, "alpine", "3.7"}
+	configs[AuthenticatedWindowsNanoServer] = Config{list.GcAuthenticatedRegistry, "windows-nanoserver", "v1"}
+	configs[APIServer] = Config{list.PromoterE2eRegistry, "sample-apiserver", "1.17.5"}
+	configs[AppArmorLoader] = Config{list.PromoterE2eRegistry, "apparmor-loader", "1.4"}
+	configs[BusyBox] = Config{list.PromoterE2eRegistry, "busybox", "1.29-2"}
+	configs[CudaVectorAdd] = Config{list.PromoterE2eRegistry, "cuda-vector-add", "1.0"}
+	configs[CudaVectorAdd2] = Config{list.PromoterE2eRegistry, "cuda-vector-add", "2.2"}
+	configs[DistrolessIptables] = Config{list.BuildImageRegistry, "distroless-iptables", "v0.1.1"}
+	configs[Etcd] = Config{list.GcEtcdRegistry, "etcd", "3.5.4-0"}
+	configs[GlusterDynamicProvisioner] = Config{list.PromoterE2eRegistry, "glusterdynamic-provisioner", "v1.3"}
+	configs[Httpd] = Config{list.PromoterE2eRegistry, "httpd", "2.4.38-2"}
+	configs[HttpdNew] = Config{list.PromoterE2eRegistry, "httpd", "2.4.39-2"}
+	configs[InvalidRegistryImage] = Config{list.InvalidRegistry, "alpine", "3.1"}
+	configs[IpcUtils] = Config{list.PromoterE2eRegistry, "ipc-utils", "1.3"}
+	configs[JessieDnsutils] = Config{list.PromoterE2eRegistry, "jessie-dnsutils", "1.5"}
+	configs[Kitten] = Config{list.PromoterE2eRegistry, "kitten", "1.5"}
+	configs[Nautilus] = Config{list.PromoterE2eRegistry, "nautilus", "1.5"}
+	configs[NFSProvisioner] = Config{list.SigStorageRegistry, "nfs-provisioner", "v3.0.1"}
+	configs[Nginx] = Config{list.PromoterE2eRegistry, "nginx", "1.14-2"}
+	configs[NginxNew] = Config{list.PromoterE2eRegistry, "nginx", "1.15-2"}
+	configs[NodePerfNpbEp] = Config{list.PromoterE2eRegistry, "node-perf/npb-ep", "1.2"}
+	configs[NodePerfNpbIs] = Config{list.PromoterE2eRegistry, "node-perf/npb-is", "1.2"}
+	configs[NodePerfTfWideDeep] = Config{list.PromoterE2eRegistry, "node-perf/tf-wide-deep", "1.2"}
+	configs[Nonewprivs] = Config{list.PromoterE2eRegistry, "nonewprivs", "1.3"}
+	configs[NonRoot] = Config{list.PromoterE2eRegistry, "nonroot", "1.2"}
+>>>>>>> 1ee1390... use new distroless kube-proxy image
+*/
 	// Pause - when these values are updated, also update cmd/kubelet/app/options/container_runtime.go
 	configs[Pause] = Config{gcRegistry, "pause", "3.2"}
 	configs[Perl] = Config{dockerLibraryRegistry, "perl", "5.26"}
