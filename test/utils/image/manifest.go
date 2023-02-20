@@ -216,7 +216,7 @@ func initImageConfigs() map[int]Config {
 	configs[CudaVectorAdd2] = Config{e2eRegistry, "cuda-vector-add", "2.0"}
         // We are switching from DebianIptables to DistrolessIptables for kube-proxy
 	// configs[DebianIptables] = Config{buildImageRegistry, "debian-iptables", "buster-v1.6.7"}
-	configs[DistrolessIptables] = Config{buildImageRegistry, "distroless-iptables", "v0.1.1"}
+	configs[DistrolessIptables] = Config{buildImageRegistry, "distroless-iptables", "v0.2.1"}
 	configs[EchoServer] = Config{e2eRegistry, "echoserver", "2.2"}
 	// configs[Etcd] = Config{gcRegistry, "etcd", "3.4.13-0"}
 	configs[Etcd] = Config{gcRegistry, "etcd", "3.4.25"}
@@ -246,8 +246,8 @@ func initImageConfigs(list RegistryList) (map[ImageID]Config, map[ImageID]Config
 	configs[BusyBox] = Config{list.PromoterE2eRegistry, "busybox", "1.29-2"}
 	configs[CudaVectorAdd] = Config{list.PromoterE2eRegistry, "cuda-vector-add", "1.0"}
 	configs[CudaVectorAdd2] = Config{list.PromoterE2eRegistry, "cuda-vector-add", "2.2"}
-	configs[DistrolessIptables] = Config{list.BuildImageRegistry, "distroless-iptables", "v0.1.1"}
-	configs[Etcd] = Config{list.GcEtcdRegistry, "etcd", "3.5.4-0"}
+	configs[DistrolessIptables] = Config{list.BuildImageRegistry, "distroless-iptables", "v0.2.1"}
+	configs[Etcd] = Config{list.GcEtcdRegistry, "etcd", "3.5.7-0"}
 	configs[GlusterDynamicProvisioner] = Config{list.PromoterE2eRegistry, "glusterdynamic-provisioner", "v1.3"}
 	configs[Httpd] = Config{list.PromoterE2eRegistry, "httpd", "2.4.38-2"}
 	configs[HttpdNew] = Config{list.PromoterE2eRegistry, "httpd", "2.4.39-2"}
