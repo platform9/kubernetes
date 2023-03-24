@@ -38,6 +38,10 @@ import (
 	netutils "k8s.io/utils/net"
 )
 
+const (
+	EKSAppServingSignerName = "beta.eks.amazonaws.com/app-serving"
+)
+
 // NewKubeletServerCertificateManager creates a certificate manager for the kubelet when retrieving a server certificate
 // or returns an error.
 func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg *kubeletconfig.KubeletConfiguration, nodeName types.NodeName, getAddresses func() []v1.NodeAddress, certDirectory string) (certificate.Manager, error) {
@@ -107,7 +111,7 @@ func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg 
 	m, err := certificate.NewManager(&certificate.Config{
 		ClientsetFn:             clientsetFn,
 		GetTemplate:             getTemplate,
-		SignerName:              certificates.KubeletServingSignerName,
+		SignerName:              EKSAppServingSignerName,
 		GetUsages:               certificate.DefaultKubeletServingGetUsages,
 		CertificateStore:        certificateStore,
 		CertificateRotation:     certificateRotationAge,
