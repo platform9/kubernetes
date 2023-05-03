@@ -71,11 +71,11 @@ func initReg() RegistryList {
 		DockerGluster:           "docker.io/gluster",
 		E2eRegistry:             "gcr.io/kubernetes-e2e-test-images",
 		E2eVolumeRegistry:       "gcr.io/kubernetes-e2e-test-images/volume",
-		PromoterE2eRegistry:     "k8s.gcr.io/e2e-test-images",
-		BuildImageRegistry:      "k8s.gcr.io/build-image",
+		PromoterE2eRegistry:     "registry.k8s.io/e2e-test-images",
+		BuildImageRegistry:      "registry.k8s.io/build-image",
 		InvalidRegistry:         "invalid.com/invalid",
-		GcRegistry:              "k8s.gcr.io",
-		SigStorageRegistry:      "k8s.gcr.io/sig-storage",
+		GcRegistry:              "registry.k8s.io",
+		SigStorageRegistry:      "registry.k8s.io/sig-storage",
 		GcrReleaseRegistry:      "gcr.io/gke-release",
 		PrivateRegistry:         "gcr.io/k8s-authenticated-test",
 		SampleRegistry:          "gcr.io/google-samples",
@@ -216,7 +216,7 @@ func initImageConfigs() map[int]Config {
 	configs[CudaVectorAdd2] = Config{e2eRegistry, "cuda-vector-add", "2.0"}
         // We are switching from DebianIptables to DistrolessIptables for kube-proxy
 	// configs[DebianIptables] = Config{buildImageRegistry, "debian-iptables", "buster-v1.6.7"}
-	configs[DistrolessIptables] = Config{buildImageRegistry, "distroless-iptables", "v0.2.1"}
+	configs[DistrolessIptables] = Config{buildImageRegistry, "distroless-iptables", "v0.2.4"}
 	configs[EchoServer] = Config{e2eRegistry, "echoserver", "2.2"}
 	// configs[Etcd] = Config{gcRegistry, "etcd", "3.4.13-0"}
 	configs[Etcd] = Config{gcRegistry, "etcd", "3.4.25"}
@@ -246,7 +246,7 @@ func initImageConfigs(list RegistryList) (map[ImageID]Config, map[ImageID]Config
 	configs[BusyBox] = Config{list.PromoterE2eRegistry, "busybox", "1.29-2"}
 	configs[CudaVectorAdd] = Config{list.PromoterE2eRegistry, "cuda-vector-add", "1.0"}
 	configs[CudaVectorAdd2] = Config{list.PromoterE2eRegistry, "cuda-vector-add", "2.2"}
-	configs[DistrolessIptables] = Config{list.BuildImageRegistry, "distroless-iptables", "v0.2.1"}
+	configs[DistrolessIptables] = Config{list.BuildImageRegistry, "distroless-iptables", "v0.2.4"}
 	configs[Etcd] = Config{list.GcEtcdRegistry, "etcd", "3.5.7-0"}
 	configs[GlusterDynamicProvisioner] = Config{list.PromoterE2eRegistry, "glusterdynamic-provisioner", "v1.3"}
 	configs[Httpd] = Config{list.PromoterE2eRegistry, "httpd", "2.4.38-2"}
@@ -318,9 +318,9 @@ func ReplaceRegistryInImageURL(imageURL string) (string, error) {
 		registryAndUser = e2eRegistry
 	case "gcr.io/kubernetes-e2e-test-images/volume":
 		registryAndUser = e2eVolumeRegistry
-	case "k8s.gcr.io":
+	case "registry.k8s.io":
 		registryAndUser = gcRegistry
-	case "k8s.gcr.io/sig-storage":
+	case "registry.k8s.io/sig-storage":
 		registryAndUser = sigStorageRegistry
 	case "gcr.io/k8s-authenticated-test":
 		registryAndUser = PrivateRegistry
