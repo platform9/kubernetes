@@ -88,8 +88,8 @@ _DEBIAN_BASE_DIGEST = {
 # Use skopeo to find these values: https://github.com/containers/skopeo
 #
 # Example
-# Manifest: skopeo inspect docker://k8s.gcr.io/build-image/debian-iptables:bullseye-v1.4.2
-# Arches: skopeo inspect --raw docker://k8s.gcr.io/build-image/debian-iptables:bullseye-v1.4.2
+# Manifest: skopeo inspect docker://k8s.gcr.io/build-image/debian-iptables:bullseye-v1.3.0
+# Arches: skopeo inspect --raw docker://k8s.gcr.io/build-image/debian-iptables:bullseye-v1.3.0
 _DEBIAN_IPTABLES_DIGEST = {
     "manifest": "sha256:160595fccf5ad4e41cc0a7acf56027802bf1a2310e704f6505baf0f88746e277",
     "amd64": "sha256:5c23936180d38c7d3a2c9492053a626f37d747445046a55e8d6279c51bc0eb31",
