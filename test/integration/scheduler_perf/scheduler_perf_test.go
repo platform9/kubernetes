@@ -22,7 +22,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -121,6 +120,8 @@ type testCase struct {
 	// This path can be overridden in createPodsOp by setting PodTemplatePath .
 	// Optional
 	DefaultPodTemplatePath *string
+	// Labels can be used to enable or disable workloads inside this test case.
+	Labels []string
 }
 
 func (tc *testCase) collectsMetrics() bool {
@@ -151,6 +152,8 @@ type workload struct {
 	Name string
 	// Values of parameters used in the workloadTemplate.
 	Params params
+	// Labels can be used to enable or disable a workload.
+	Labels []string
 }
 
 type params struct {
@@ -265,6 +268,14 @@ func isValidParameterizable(val string) bool {
 	return strings.HasPrefix(val, "$")
 }
 
+func isValidCount(allowParameterization bool, count int, countParam string) bool {
+	if !allowParameterization || countParam == "" {
+		// Ignore parameter. The value itself must be okay.
+		return count >= 0
+	}
+	return isValidParameterizable(countParam)
+}
+
 // createNodesOp defines an op where nodes are created as a part of a workload.
 type createNodesOp struct {
 	// Must be "createNodes".
@@ -288,9 +299,7 @@ func (cno *createNodesOp) isValid(allowParameterization bool) error {
 	if cno.Opcode != createNodesOpcode {
 		return fmt.Errorf("invalid opcode %q", cno.Opcode)
 	}
-	ok := cno.Count > 0 ||
-		(cno.CountParam != "" && allowParameterization && isValidParameterizable(cno.CountParam))
-	if !ok {
+	if !isValidCount(allowParameterization, cno.Count, cno.CountParam) {
 		return fmt.Errorf("invalid Count=%d / CountParam=%q", cno.Count, cno.CountParam)
 	}
 	return nil
@@ -331,9 +340,7 @@ func (cmo *createNamespacesOp) isValid(allowParameterization bool) error {
 	if cmo.Opcode != createNamespacesOpcode {
 		return fmt.Errorf("invalid opcode %q", cmo.Opcode)
 	}
-	ok := cmo.Count > 0 ||
-		(cmo.CountParam != "" && allowParameterization && isValidParameterizable(cmo.CountParam))
-	if !ok {
+	if !isValidCount(allowParameterization, cmo.Count, cmo.CountParam) {
 		return fmt.Errorf("invalid Count=%d / CountParam=%q", cmo.Count, cmo.CountParam)
 	}
 	return nil
@@ -390,9 +397,7 @@ func (cpo *createPodsOp) isValid(allowParameterization bool) error {
 	if cpo.Opcode != createPodsOpcode {
 		return fmt.Errorf("invalid opcode %q; expected %q", cpo.Opcode, createPodsOpcode)
 	}
-	ok := cpo.Count > 0 ||
-		(cpo.CountParam != "" && allowParameterization && isValidParameterizable(cpo.CountParam))
-	if !ok {
+	if !isValidCount(allowParameterization, cpo.Count, cpo.CountParam) {
 		return fmt.Errorf("invalid Count=%d / CountParam=%q", cpo.Count, cpo.CountParam)
 	}
 	if cpo.CollectMetrics && cpo.SkipWaitToCompletion {
@@ -438,9 +443,7 @@ func (cpso *createPodSetsOp) isValid(allowParameterization bool) error {
 	if cpso.Opcode != createPodSetsOpcode {
 		return fmt.Errorf("invalid opcode %q; expected %q", cpso.Opcode, createPodSetsOpcode)
 	}
-	ok := cpso.Count > 0 ||
-		(cpso.CountParam != "" && allowParameterization && isValidParameterizable(cpso.CountParam))
-	if !ok {
+	if !isValidCount(allowParameterization, cpso.Count, cpso.CountParam) {
 		return fmt.Errorf("invalid Count=%d / CountParam=%q", cpso.Count, cpso.CountParam)
 	}
 	return cpso.CreatePodsOp.isValid(allowParameterization)
@@ -598,7 +601,7 @@ func initTestOutput(tb testing.TB) io.Writer {
 			if err := fileOutput.Close(); err != nil {
 				tb.Fatalf("close log file: %v", err)
 			}
-			log, err := ioutil.ReadFile(logfileName)
+			log, err := os.ReadFile(logfileName)
 			if err != nil {
 				tb.Fatalf("read log file: %v", err)
 			}
@@ -607,6 +610,8 @@ func initTestOutput(tb testing.TB) io.Writer {
 	}
 	return output
 }
+
+var perfSchedulingLabelFilter = flag.String("perf-scheduling-label-filter", "performance", "comma-separated list of labels which a testcase must have (no prefix or +) or must not have (-)")
 
 func BenchmarkPerfScheduling(b *testing.B) {
 	testCases, err := getTestCases(configFile)
@@ -632,6 +637,10 @@ func BenchmarkPerfScheduling(b *testing.B) {
 		b.Run(tc.Name, func(b *testing.B) {
 			for _, w := range tc.Workloads {
 				b.Run(w.Name, func(b *testing.B) {
+					if !enabled(*perfSchedulingLabelFilter, append(tc.Labels, w.Labels...)...) {
+						b.Skipf("disabled by label filter %q", *perfSchedulingLabelFilter)
+					}
+
 					// Ensure that there are no leaked
 					// goroutines.  They could influence
 					// performance of the next benchmark.
@@ -750,8 +759,13 @@ func runWorkload(ctx context.Context, b *testing.B, tc *testCase, w *workload) [
 			b.Fatalf("validate scheduler config file failed: %v", err)
 		}
 	}
-	finalFunc, podInformer, client, dynClient := mustSetupScheduler(ctx, b, cfg)
-	b.Cleanup(finalFunc)
+	informerFactory, client, dynClient := mustSetupScheduler(ctx, b, cfg)
+
+	// Additional informers needed for testing. The pod informer was
+	// already created before (scheduler.NewInformerFactory) and the
+	// factory was started for it (mustSetupScheduler), therefore we don't
+	// need to start again.
+	podInformer := informerFactory.Core().V1().Pods()
 
 	var mu sync.Mutex
 	var dataItems []DataItem
@@ -759,6 +773,7 @@ func runWorkload(ctx context.Context, b *testing.B, tc *testCase, w *workload) [
 	// numPodsScheduledPerNamespace has all namespaces created in workload and the number of pods they (will) have.
 	// All namespaces listed in numPodsScheduledPerNamespace will be cleaned up.
 	numPodsScheduledPerNamespace := make(map[string]int)
+
 	b.Cleanup(func() {
 		for namespace := range numPodsScheduledPerNamespace {
 			if err := client.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{}); err != nil {
@@ -817,27 +832,26 @@ func runWorkload(ctx context.Context, b *testing.B, tc *testCase, w *workload) [
 			if concreteOp.Namespace != nil {
 				namespace = *concreteOp.Namespace
 			}
-			if _, ok := numPodsScheduledPerNamespace[namespace]; !ok {
-				// The namespace has not created yet.
-				// So, creat that and register it to numPodsScheduledPerNamespace.
-				_, err := client.CoreV1().Namespaces().Create(ctx, &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}, metav1.CreateOptions{})
-				if err != nil {
-					b.Fatalf("failed to create namespace for Pod: %v", namespace)
-				}
-				numPodsScheduledPerNamespace[namespace] = 0
-			}
+			createNamespaceIfNotPresent(ctx, b, client, namespace, &numPodsScheduledPerNamespace)
 			if concreteOp.PodTemplatePath == nil {
 				concreteOp.PodTemplatePath = tc.DefaultPodTemplatePath
 			}
 			var collectors []testDataCollector
 			var collectorCtx context.Context
 			var collectorCancel func()
+			var collectorWG sync.WaitGroup
 			if concreteOp.CollectMetrics {
 				collectorCtx, collectorCancel = context.WithCancel(ctx)
 				defer collectorCancel()
-				collectors = getTestDataCollectors(podInformer, fmt.Sprintf("%s/%s", b.Name(), namespace), namespace, tc.MetricsCollectorConfig)
+				collectors = getTestDataCollectors(b, podInformer, fmt.Sprintf("%s/%s", b.Name(), namespace), namespace, tc.MetricsCollectorConfig)
 				for _, collector := range collectors {
-					go collector.run(collectorCtx)
+					// Need loop-local variable for function below.
+					collector := collector
+					collectorWG.Add(1)
+					go func() {
+						defer collectorWG.Done()
+						collector.run(collectorCtx)
+					}()
 				}
 			}
 			if err := createPods(ctx, b, namespace, concreteOp, client); err != nil {
@@ -861,6 +875,7 @@ func runWorkload(ctx context.Context, b *testing.B, tc *testCase, w *workload) [
 				// same time, so if we're here, it means that all pods have been
 				// scheduled.
 				collectorCancel()
+				collectorWG.Wait()
 				mu.Lock()
 				for _, collector := range collectors {
 					dataItems = append(dataItems, collector.collect()...)
@@ -1013,17 +1028,29 @@ func runWorkload(ctx context.Context, b *testing.B, tc *testCase, w *workload) [
 	return dataItems
 }
 
+func createNamespaceIfNotPresent(ctx context.Context, b *testing.B, client clientset.Interface, namespace string, podsPerNamespace *map[string]int) {
+	if _, ok := (*podsPerNamespace)[namespace]; !ok {
+		// The namespace has not created yet.
+		// So, create that and register it.
+		_, err := client.CoreV1().Namespaces().Create(ctx, &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}, metav1.CreateOptions{})
+		if err != nil {
+			b.Fatalf("failed to create namespace for Pod: %v", namespace)
+		}
+		(*podsPerNamespace)[namespace] = 0
+	}
+}
+
 type testDataCollector interface {
 	run(ctx context.Context)
 	collect() []DataItem
 }
 
-func getTestDataCollectors(podInformer coreinformers.PodInformer, name, namespace string, mcc *metricsCollectorConfig) []testDataCollector {
+func getTestDataCollectors(tb testing.TB, podInformer coreinformers.PodInformer, name, namespace string, mcc *metricsCollectorConfig) []testDataCollector {
 	if mcc == nil {
 		mcc = &defaultMetricsCollectorConfig
 	}
 	return []testDataCollector{
-		newThroughputCollector(podInformer, map[string]string{"Name": name}, []string{namespace}),
+		newThroughputCollector(tb, podInformer, map[string]string{"Name": name}, []string{namespace}),
 		newMetricsCollector(mcc, map[string]string{"Name": name}),
 	}
 }

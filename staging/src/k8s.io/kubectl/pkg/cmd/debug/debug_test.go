@@ -28,7 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
 	"k8s.io/utils/pointer"
 )
@@ -316,7 +316,7 @@ func TestGenerateDebugContainer(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.opts.IOStreams = genericclioptions.NewTestIOStreamsDiscard()
+			tc.opts.IOStreams = genericiooptions.NewTestIOStreamsDiscard()
 			suffixCounter = 0
 
 			if tc.pod == nil {
@@ -1202,6 +1202,46 @@ func TestGeneratePodCopyWithDebugContainer(t *testing.T) {
 			},
 		},
 		{
+			name: "baseline profile not share process when user explicitly disables it",
+			opts: &DebugOptions{
+				CopyTo:                "debugger",
+				Container:             "debugger",
+				Image:                 "busybox",
+				PullPolicy:            corev1.PullIfNotPresent,
+				Profile:               ProfileBaseline,
+				ShareProcesses:        false,
+				shareProcessedChanged: true,
+			},
+			havePod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "target",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "debugger",
+						},
+					},
+					NodeName: "node-1",
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "debugger",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            "debugger",
+							Image:           "busybox",
+							ImagePullPolicy: corev1.PullIfNotPresent,
+						},
+					},
+					ShareProcessNamespace: pointer.Bool(false),
+				},
+			},
+		},
+		{
 			name: "restricted profile",
 			opts: &DebugOptions{
 				CopyTo:     "debugger",
@@ -1294,7 +1334,7 @@ func TestGeneratePodCopyWithDebugContainer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Fail to create profile applier: %s: %v", tc.opts.Profile, err)
 			}
-			tc.opts.IOStreams = genericclioptions.NewTestIOStreamsDiscard()
+			tc.opts.IOStreams = genericiooptions.NewTestIOStreamsDiscard()
 			suffixCounter = 0
 
 			if tc.havePod == nil {
@@ -1676,7 +1716,7 @@ func TestGenerateNodeDebugPod(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Fail to create profile applier: %s: %v", tc.opts.Profile, err)
 			}
-			tc.opts.IOStreams = genericclioptions.NewTestIOStreamsDiscard()
+			tc.opts.IOStreams = genericiooptions.NewTestIOStreamsDiscard()
 			suffixCounter = 0
 
 			pod, err := tc.opts.generateNodeDebugPod(tc.node)
@@ -1692,7 +1732,7 @@ func TestGenerateNodeDebugPod(t *testing.T) {
 
 func TestCompleteAndValidate(t *testing.T) {
 	tf := cmdtesting.NewTestFactory().WithNamespace("test")
-	ioStreams, _, _, _ := genericclioptions.NewTestIOStreams()
+	ioStreams, _, _, _ := genericiooptions.NewTestIOStreams()
 	cmpFilter := cmp.FilterPath(func(p cmp.Path) bool {
 		switch p.String() {
 		// IOStreams contains unexported fields

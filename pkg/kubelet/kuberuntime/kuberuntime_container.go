@@ -136,7 +136,6 @@ func calcRestartCountByLogDir(path string) (int, error) {
 	if _, err := os.Stat(path); err != nil {
 		return 0, nil
 	}
-	restartCount := int(0)
 	files, err := os.ReadDir(path)
 	if err != nil {
 		return 0, err
@@ -144,6 +143,7 @@ func calcRestartCountByLogDir(path string) (int, error) {
 	if len(files) == 0 {
 		return 0, nil
 	}
+	restartCount := 0
 	restartCountLogFileRegex := regexp.MustCompile(`^(\d+)\.log(\..*)?`)
 	for _, file := range files {
 		if file.IsDir() {
@@ -724,11 +724,6 @@ func (m *kubeGenericRuntimeManager) killContainer(ctx context.Context, pod *v1.P
 		message = fmt.Sprintf("Stopping container %s", containerSpec.Name)
 	}
 	m.recordContainerEvent(pod, containerSpec, containerID.ID, v1.EventTypeNormal, events.KillingContainer, message)
-
-	// Run internal pre-stop lifecycle hook
-	if err := m.internalLifecycle.PreStopContainer(containerID.ID); err != nil {
-		return err
-	}
 
 	// Run the pre-stop lifecycle hooks if applicable and if there is enough time to run it
 	if containerSpec.Lifecycle != nil && containerSpec.Lifecycle.PreStop != nil && gracePeriod > 0 {

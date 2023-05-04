@@ -42,7 +42,7 @@ localAPIEndpoint:
 bootstrapTokens:
 - token: "abcdef.0123456789abcdef"
 nodeRegistration:
-  criSocket: unix:///var/run/containerd/containerd.sock
+  criSocket: %s
   name: someName
   ignorePreflightErrors:
     - c
@@ -51,7 +51,7 @@ nodeRegistration:
 apiVersion: %[1]s
 kind: ClusterConfiguration
 controlPlaneEndpoint: "3.4.5.6"
-`, kubeadmapiv1.SchemeGroupVersion.String())
+`, kubeadmapiv1.SchemeGroupVersion.String(), expectedCRISocket)
 
 func TestNewInitData(t *testing.T) {
 	// create temp directory
@@ -81,7 +81,7 @@ func TestNewInitData(t *testing.T) {
 	}{
 		// Init data passed using flags
 		{
-			name: "pass without any flag (use defaults)",
+			name: "pass without any flag except the cri socket (use defaults)",
 		},
 		{
 			name: "fail if unknown feature gates flag are passed",
@@ -113,7 +113,7 @@ func TestNewInitData(t *testing.T) {
 					cfg: &kubeadmapi.InitConfiguration{
 						NodeRegistration: kubeadmapi.NodeRegistrationOptions{
 							Name:                  "somename",
-							CRISocket:             "unix:///var/run/containerd/containerd.sock",
+							CRISocket:             expectedCRISocket,
 							IgnorePreflightErrors: []string{"c", "d"},
 							ImagePullPolicy:       "IfNotPresent",
 						},
@@ -190,6 +190,15 @@ func TestNewInitData(t *testing.T) {
 			initOptions := newInitOptions()
 			cmd := newCmdInit(nil, initOptions)
 
+			// set the cri socket here, otherwise the testcase might fail if is run on the node with multiple
+			// cri endpoints configured, the failure caused by this is normally not an expected failure.
+			if tc.flags == nil {
+				tc.flags = make(map[string]string)
+			}
+			// set `cri-socket` only if `CfgPath` is not set
+			if _, okay := tc.flags[options.CfgPath]; !okay {
+				tc.flags[options.NodeCRISocket] = constants.UnknownCRISocket
+			}
 			// sets cmd flags (that will be reflected on the init options)
 			for f, v := range tc.flags {
 				cmd.Flags().Set(f, v)

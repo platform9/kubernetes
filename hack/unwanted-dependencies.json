@@ -43,11 +43,6 @@
   },
   "status": {
     "unwantedReferences": {
-      "github.com/PuerkitoBio/urlesc": [
-        "sigs.k8s.io/kustomize/api",
-        "sigs.k8s.io/kustomize/kustomize/v4",
-        "sigs.k8s.io/kustomize/kyaml"
-      ],
       "github.com/getsentry/raven-go": [
         "go.etcd.io/etcd/raft/v3"
       ],
@@ -72,7 +67,7 @@
       ],
       "github.com/google/shlex": [
         "sigs.k8s.io/kustomize/api",
-        "sigs.k8s.io/kustomize/kustomize/v4"
+        "sigs.k8s.io/kustomize/kustomize/v5"
       ],
       "github.com/gorilla/websocket": [
         "github.com/moby/spdystream",
@@ -88,10 +83,8 @@
         "sigs.k8s.io/structured-merge-diff/v4"
       ],
       "github.com/pkg/errors": [
-        "github.com/Microsoft/go-winio",
         "github.com/Microsoft/hcsshim",
         "github.com/aws/aws-sdk-go",
-        "github.com/containerd/cgroups",
         "github.com/containerd/continuity",
         "github.com/containerd/fifo",
         "github.com/containerd/go-runc",
@@ -104,8 +97,7 @@
         "gotest.tools/v3",
         "k8s.io/system-validators",
         "sigs.k8s.io/kustomize/api",
-        "sigs.k8s.io/kustomize/kustomize/v4",
-        "sigs.k8s.io/kustomize/kyaml"
+        "sigs.k8s.io/kustomize/kustomize/v5"
       ]
     }
   }

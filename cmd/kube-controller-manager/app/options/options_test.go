@@ -23,11 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 
 	eventv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/diff"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	cpconfig "k8s.io/cloud-provider/config"
@@ -94,6 +94,7 @@ var args = []string{
 	"--concurrent-service-endpoint-syncs=10",
 	"--concurrent-gc-syncs=30",
 	"--concurrent-namespace-syncs=20",
+	"--concurrent-job-syncs=10",
 	"--concurrent-replicaset-syncs=10",
 	"--concurrent-resource-quota-syncs=10",
 	"--concurrent-service-syncs=2",
@@ -107,7 +108,6 @@ var args = []string{
 	"--enable-dynamic-provisioning=false",
 	"--enable-garbage-collector=false",
 	"--enable-hostpath-provisioner=true",
-	"--enable-taint-manager=false",
 	"--cluster-signing-duration=10h",
 	"--flex-volume-plugin-dir=/flex-volume-plugin",
 	"--volume-host-cidr-denylist=127.0.0.1/28,feed::/16",
@@ -142,7 +142,6 @@ var args = []string{
 	"--node-monitor-grace-period=30s",
 	"--node-monitor-period=10s",
 	"--node-startup-grace-period=30s",
-	"--pod-eviction-timeout=2m",
 	"--profiling=false",
 	"--pv-recycler-increment-timeout-nfs=45",
 	"--pv-recycler-minimum-timeout-hostpath=45",
@@ -321,7 +320,7 @@ func TestAddFlags(t *testing.T) {
 		},
 		JobController: &JobControllerOptions{
 			&jobconfig.JobControllerConfiguration{
-				ConcurrentJobSyncs: 5,
+				ConcurrentJobSyncs: 10,
 			},
 		},
 		CronJobController: &CronJobControllerOptions{
@@ -344,12 +343,10 @@ func TestAddFlags(t *testing.T) {
 		},
 		NodeLifecycleController: &NodeLifecycleControllerOptions{
 			&nodelifecycleconfig.NodeLifecycleControllerConfiguration{
-				EnableTaintManager:        false,
 				NodeEvictionRate:          0.2,
 				SecondaryNodeEvictionRate: 0.05,
 				NodeMonitorGracePeriod:    metav1.Duration{Duration: 30 * time.Second},
 				NodeStartupGracePeriod:    metav1.Duration{Duration: 30 * time.Second},
-				PodEvictionTimeout:        metav1.Duration{Duration: 2 * time.Minute},
 				LargeClusterSizeThreshold: 100,
 				UnhealthyZoneThreshold:    0.6,
 			},
@@ -445,7 +442,7 @@ func TestAddFlags(t *testing.T) {
 	sort.Sort(sortedGCIgnoredResources(expected.GarbageCollectorController.GCIgnoredResources))
 
 	if !reflect.DeepEqual(expected, s) {
-		t.Errorf("Got different run options than expected.\nDifference detected on:\n%s", diff.ObjectReflectDiff(expected, s))
+		t.Errorf("Got different run options than expected.\nDifference detected on:\n%s", cmp.Diff(expected, s))
 	}
 }
 
@@ -574,7 +571,7 @@ func TestApplyTo(t *testing.T) {
 				HorizontalPodAutoscalerTolerance:                    0.1,
 			},
 			JobController: jobconfig.JobControllerConfiguration{
-				ConcurrentJobSyncs: 5,
+				ConcurrentJobSyncs: 10,
 			},
 			CronJobController: cronjobconfig.CronJobControllerConfiguration{
 				ConcurrentCronJobSyncs: 5,
@@ -589,12 +586,10 @@ func TestApplyTo(t *testing.T) {
 				NodeCIDRMaskSizeIPv6: 108,
 			},
 			NodeLifecycleController: nodelifecycleconfig.NodeLifecycleControllerConfiguration{
-				EnableTaintManager:        false,
 				NodeEvictionRate:          0.2,
 				SecondaryNodeEvictionRate: 0.05,
 				NodeMonitorGracePeriod:    metav1.Duration{Duration: 30 * time.Second},
 				NodeStartupGracePeriod:    metav1.Duration{Duration: 30 * time.Second},
-				PodEvictionTimeout:        metav1.Duration{Duration: 2 * time.Minute},
 				LargeClusterSizeThreshold: 100,
 				UnhealthyZoneThreshold:    0.6,
 			},
@@ -646,7 +641,7 @@ func TestApplyTo(t *testing.T) {
 	s.ApplyTo(c)
 
 	if !reflect.DeepEqual(expected.ComponentConfig, c.ComponentConfig) {
-		t.Errorf("Got different configuration than expected.\nDifference detected on:\n%s", diff.ObjectReflectDiff(expected.ComponentConfig, c.ComponentConfig))
+		t.Errorf("Got different configuration than expected.\nDifference detected on:\n%s", cmp.Diff(expected.ComponentConfig, c.ComponentConfig))
 	}
 }
 
@@ -1082,6 +1077,16 @@ func TestValidateControllersOptions(t *testing.T) {
 				},
 			}).Validate,
 		},
+		{
+			name:                   "JobControllerOptions ConcurrentJobSyncs equal 0",
+			expectErrors:           true,
+			expectedErrorSubString: "concurrent-job-syncs must be greater than 0",
+			validate: (&JobControllerOptions{
+				&jobconfig.JobControllerConfiguration{
+					ConcurrentJobSyncs: 0,
+				},
+			}).Validate,
+		},
 		/* empty errs */
 		{
 			name:         "CronJobControllerOptions",
@@ -1145,7 +1150,7 @@ func TestValidateControllersOptions(t *testing.T) {
 			expectErrors: false,
 			validate: (&JobControllerOptions{
 				&jobconfig.JobControllerConfiguration{
-					ConcurrentJobSyncs: 5,
+					ConcurrentJobSyncs: 10,
 				},
 			}).Validate,
 		},
@@ -1164,12 +1169,10 @@ func TestValidateControllersOptions(t *testing.T) {
 			expectErrors: false,
 			validate: (&NodeLifecycleControllerOptions{
 				&nodelifecycleconfig.NodeLifecycleControllerConfiguration{
-					EnableTaintManager:        false,
 					NodeEvictionRate:          0.2,
 					SecondaryNodeEvictionRate: 0.05,
 					NodeMonitorGracePeriod:    metav1.Duration{Duration: 30 * time.Second},
 					NodeStartupGracePeriod:    metav1.Duration{Duration: 30 * time.Second},
-					PodEvictionTimeout:        metav1.Duration{Duration: 2 * time.Minute},
 					LargeClusterSizeThreshold: 100,
 					UnhealthyZoneThreshold:    0.6,
 				},

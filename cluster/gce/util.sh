@@ -48,13 +48,20 @@ fi
 
 if [[ "${MASTER_OS_DISTRIBUTION}" == "gci" ]]; then
     DEFAULT_GCI_PROJECT=google-containers
-    if [[ "${GCI_VERSION}" == "cos"* ]]; then
+    if [[ "${GCI_VERSION}" == "cos"* ]] || [[ "${MASTER_IMAGE_FAMILY}" == "cos"* ]]; then
         DEFAULT_GCI_PROJECT=cos-cloud
     fi
     export MASTER_IMAGE_PROJECT=${KUBE_GCE_MASTER_PROJECT:-${DEFAULT_GCI_PROJECT}}
-    # If the master image is not set, we use the latest GCI image.
-    # Otherwise, we respect whatever is set by the user.
-    export MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-${GCI_VERSION}}
+
+    # If the master image is not set, we use the latest image based on image
+    # family.
+    kube_master_image="${KUBE_GCE_MASTER_IMAGE:-${GCI_VERSION}}"
+    if [[ -z "${kube_master_image}" ]]; then
+      kube_master_image=$(gcloud compute images list --project="${MASTER_IMAGE_PROJECT}" --no-standard-images --filter="family:${MASTER_IMAGE_FAMILY}" --format 'value(name)')
+    fi
+
+    echo "Using image: ${kube_master_image} from project: ${MASTER_IMAGE_PROJECT} as master image" >&2
+    export MASTER_IMAGE="${kube_master_image}"
 fi
 
 # Sets node image based on the specified os distro. Currently this function only
@@ -69,14 +76,23 @@ fi
 function set-linux-node-image() {
   if [[ "${NODE_OS_DISTRIBUTION}" == "gci" ]]; then
     DEFAULT_GCI_PROJECT=google-containers
-    if [[ "${GCI_VERSION}" == "cos"* ]]; then
+    if [[ "${GCI_VERSION}" == "cos"* ]] || [[ "${NODE_IMAGE_FAMILY}" == "cos"* ]]; then
       DEFAULT_GCI_PROJECT=cos-cloud
     fi
 
-    # If the node image is not set, we use the latest GCI image.
+    # If the node image is not set, we use the latest image based on image
+    # family.
     # Otherwise, we respect whatever is set by the user.
-    NODE_IMAGE=${KUBE_GCE_NODE_IMAGE:-${GCI_VERSION}}
     NODE_IMAGE_PROJECT=${KUBE_GCE_NODE_PROJECT:-${DEFAULT_GCI_PROJECT}}
+    local kube_node_image
+
+    kube_node_image="${KUBE_GCE_NODE_IMAGE:-${GCI_VERSION}}"
+    if [[ -z "${kube_node_image}" ]]; then
+      kube_node_image=$(gcloud compute images list --project="${NODE_IMAGE_PROJECT}" --no-standard-images --filter="family:${NODE_IMAGE_FAMILY}" --format 'value(name)')
+    fi
+
+    echo "Using image: ${kube_node_image} from project: ${NODE_IMAGE_PROJECT} as node image" >&2
+    export NODE_IMAGE="${kube_node_image}"
   fi
 }
 
@@ -334,8 +350,6 @@ function upload-tars() {
       echo "Creating ${staging_bucket}"
       gsutil mb -l "${region}" -p "${PROJECT}" "${staging_bucket}"
     fi
-
-    gsutil retention clear "${staging_bucket}"
 
     local staging_path="${staging_bucket}/${INSTANCE_PREFIX}-devel"
 
@@ -863,10 +877,6 @@ function construct-windows-kubelet-flags {
   # Turn off kernel memory cgroup notification.
   flags+=" --kernel-memcg-notification=false"
 
-  # TODO(#78628): Re-enable KubeletPodResources when the issue is fixed.
-  # Force disable KubeletPodResources feature on Windows until #78628 is fixed.
-  flags+=" --feature-gates=KubeletPodResources=false"
-
   WINDOWS_CONTAINER_RUNTIME_ENDPOINT=${KUBE_WINDOWS_CONTAINER_RUNTIME_ENDPOINT:-npipe:////./pipe/containerd-containerd}
   flags+=" --container-runtime-endpoint=${WINDOWS_CONTAINER_RUNTIME_ENDPOINT}"
 
@@ -1183,7 +1193,6 @@ PROMETHEUS_TO_SD_ENDPOINT: $(yaml-quote "${PROMETHEUS_TO_SD_ENDPOINT:-}")
 PROMETHEUS_TO_SD_PREFIX: $(yaml-quote "${PROMETHEUS_TO_SD_PREFIX:-}")
 ENABLE_PROMETHEUS_TO_SD: $(yaml-quote "${ENABLE_PROMETHEUS_TO_SD:-false}")
 DISABLE_PROMETHEUS_TO_SD_IN_DS: $(yaml-quote "${DISABLE_PROMETHEUS_TO_SD_IN_DS:-false}")
-CONTAINER_RUNTIME: $(yaml-quote "${CONTAINER_RUNTIME:-}")
 CONTAINER_RUNTIME_ENDPOINT: $(yaml-quote "${CONTAINER_RUNTIME_ENDPOINT:-}")
 CONTAINER_RUNTIME_NAME: $(yaml-quote "${CONTAINER_RUNTIME_NAME:-}")
 CONTAINER_RUNTIME_TEST_HANDLER: $(yaml-quote "${CONTAINER_RUNTIME_TEST_HANDLER:-}")
@@ -1277,6 +1286,11 @@ EOF
   if [ -n "${RUN_CONTROLLERS:-}" ]; then
     cat >>"$file" <<EOF
 RUN_CONTROLLERS: $(yaml-quote "${RUN_CONTROLLERS}")
+EOF
+  fi
+  if [ -n "${RUN_CCM_CONTROLLERS:-}" ]; then
+    cat >>"$file" <<EOF
+RUN_CCM_CONTROLLERS: $(yaml-quote "${RUN_CCM_CONTROLLERS}")
 EOF
   fi
   if [ -n "${PROVIDER_VARS:-}" ]; then

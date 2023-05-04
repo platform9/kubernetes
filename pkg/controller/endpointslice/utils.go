@@ -138,8 +138,8 @@ func newEndpointSlice(service *v1.Service, endpointMeta *endpointMeta) *discover
 			OwnerReferences: []metav1.OwnerReference{*ownerRef},
 			Namespace:       service.Namespace,
 		},
-		Ports:       endpointMeta.Ports,
-		AddressType: endpointMeta.AddressType,
+		Ports:       endpointMeta.ports,
+		AddressType: endpointMeta.addressType,
 		Endpoints:   []discovery.Endpoint{},
 	}
 	// add parent service labels
@@ -246,7 +246,7 @@ func setEndpointSliceLabels(epSlice *discovery.EndpointSlice, service *v1.Servic
 	// check if the endpoint slice and the service have the same labels
 	// clone current slice labels except the reserved labels
 	for key, value := range epSlice.Labels {
-		if IsReservedLabelKey(key) {
+		if isReservedLabelKey(key) {
 			continue
 		}
 		// copy endpoint slice labels
@@ -254,7 +254,7 @@ func setEndpointSliceLabels(epSlice *discovery.EndpointSlice, service *v1.Servic
 	}
 
 	for key, value := range service.Labels {
-		if IsReservedLabelKey(key) {
+		if isReservedLabelKey(key) {
 			klog.Warningf("Service %s/%s using reserved endpoint slices label, skipping label %s: %s", service.Namespace, service.Name, key, value)
 			continue
 		}
@@ -281,8 +281,8 @@ func setEndpointSliceLabels(epSlice *discovery.EndpointSlice, service *v1.Servic
 	return svcLabels, updated
 }
 
-// IsReservedLabelKey return true if the label is one of the reserved label for slices
-func IsReservedLabelKey(label string) bool {
+// isReservedLabelKey return true if the label is one of the reserved label for slices
+func isReservedLabelKey(label string) bool {
 	if label == discovery.LabelServiceName ||
 		label == discovery.LabelManagedBy ||
 		label == v1.IsHeadlessService {
@@ -378,12 +378,17 @@ func unchangedSlices(existingSlices, slicesToUpdate, slicesToDelete []*discovery
 	return unchangedSlices
 }
 
-// hintsEnabled returns true if the provided annotations include a
-// v1.AnnotationTopologyAwareHints key with a value set to "Auto" or "auto".
+// hintsEnabled returns true if the provided annotations include either
+// v1.AnnotationTopologyMode or v1.DeprecatedAnnotationTopologyAwareHints key
+// with a value set to "Auto" or "auto". When both are set,
+// v1.DeprecatedAnnotationTopologyAwareHints has precedence.
 func hintsEnabled(annotations map[string]string) bool {
-	val, ok := annotations[v1.AnnotationTopologyAwareHints]
+	val, ok := annotations[v1.DeprecatedAnnotationTopologyAwareHints]
 	if !ok {
-		return false
+		val, ok = annotations[v1.AnnotationTopologyMode]
+		if !ok {
+			return false
+		}
 	}
 	return val == "Auto" || val == "auto"
 }
@@ -399,4 +404,14 @@ func managedByChanged(endpointSlice1, endpointSlice2 *discovery.EndpointSlice) b
 func managedByController(endpointSlice *discovery.EndpointSlice) bool {
 	managedBy, _ := endpointSlice.Labels[discovery.LabelManagedBy]
 	return managedBy == controllerName
+}
+
+// isNodeReady returns true if a node is ready; false otherwise.
+func isNodeReady(node *v1.Node) bool {
+	for _, c := range node.Status.Conditions {
+		if c.Type == v1.NodeReady {
+			return c.Status == v1.ConditionTrue
+		}
+	}
+	return false
 }
