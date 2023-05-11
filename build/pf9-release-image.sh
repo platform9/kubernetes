@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This file will build k8s image. retag it and push image to dockerhub
-make quick-release-images KUBE_EXTRA_WHAT="cmd/kubectl" KUBE_BUILD_CONFORMANCE=n KUBE_BUILD_HYPERKUBE=n KUBE_VERBOSE=0 KUBE_BUILD_PLATFORMS=linux/amd64 KUBE_DOCKER_REGISTRY=platform9
+make quick-release-images KUBE_EXTRA_WHAT="cmd/kube-proxy" KUBE_BUILD_CONFORMANCE=n KUBE_BUILD_HYPERKUBE=n KUBE_VERBOSE=0 KUBE_BUILD_PLATFORMS=linux/amd64 KUBE_DOCKER_REGISTRY=platform9
 
 # Load the Docker image from the TAR file
 docker load -i $TAR_FILE
@@ -13,7 +13,7 @@ ORIGINAL_TAG=$(docker images --format '{{.Tag}}' $ORIGINAL_IMAGE_NAME | head -n 
 # Extract the version number from the original tag
 VERSION=$(echo $ORIGINAL_TAG | cut -d '-' -f 1)
 
-# Adding PMK  build tag
+# Adding PMK build tag
 VERSION="$VERSION-pmk-$TEAMCITY_BUILD_ID"
 
 # Retag the Docker image with the new name and version number
