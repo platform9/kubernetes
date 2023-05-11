@@ -104,7 +104,7 @@ var _ = SIGDescribe("KubeProxy", func() {
 				Containers: []v1.Container{
 					{
 						Name:            "e2e-net-exec",
-						Image:           imageutils.GetE2EImage(imageutils.DebianIptables),
+						Image:           imageutils.GetE2EImage(imageutils.DistrolessIptables),
 						ImagePullPolicy: v1.PullIfNotPresent,
 						Command:         []string{"sleep", "600"},
 						SecurityContext: &v1.SecurityContext{
