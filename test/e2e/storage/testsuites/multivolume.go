@@ -486,8 +486,7 @@ func TestConcurrentAccessToSingleVolume(f *framework.Framework, cs clientset.Int
 			SeLinuxLabel:  e2evolume.GetLinuxLabel(),
 			NodeSelection: node,
 			PVCsReadOnly:  readOnly,
-			// ImageID:       e2evolume.GetTestImageID(imageutils.DebianIptables),
-			ImageID:       e2evolume.GetTestImageID(imageutils.DistrolessIptables),
+			ImageID:       e2evolume.GetTestImageID(imageutils.DebianIptables),
 		}
 		pod, err := e2epod.CreateSecPodWithNodeSelection(cs, &podConfig, framework.PodStartTimeout)
 		defer func() {
