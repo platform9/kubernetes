@@ -23,7 +23,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +43,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 
 	"github.com/godbus/dbus/v5"
 	v1 "k8s.io/api/core/v1"
@@ -55,7 +59,29 @@ import (
 
 var _ = SIGDescribe("GracefulNodeShutdown [Serial] [NodeFeature:GracefulNodeShutdown] [NodeFeature:GracefulNodeShutdownBasedOnPodPriority]", func() {
 	f := framework.NewDefaultFramework("graceful-node-shutdown")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
+
+	ginkgo.BeforeEach(func() {
+		if _, err := exec.LookPath("systemd-run"); err == nil {
+			if version, verr := exec.Command("systemd-run", "--version").Output(); verr == nil {
+				// sample output from $ systemd-run --version
+				// systemd 245 (245.4-4ubuntu3.13)
+				re := regexp.MustCompile(`systemd (\d+)`)
+				if match := re.FindSubmatch(version); len(match) > 1 {
+					systemdVersion, err := strconv.Atoi(string(match[1]))
+					if err != nil {
+						framework.Logf("failed to parse systemd version with error %v, 'systemd-run --version' output was [%s]", err, version)
+					} else {
+						// See comments in issue 107043, this is a known problem for a long time that this feature does not work on older systemd
+						// https://github.com/kubernetes/kubernetes/issues/107043#issuecomment-997546598
+						if systemdVersion < 245 {
+							e2eskipper.Skipf("skipping GracefulNodeShutdown tests as we are running on an old version of systemd : %d", systemdVersion)
+						}
+					}
+				}
+			}
+		}
+	})
 
 	ginkgo.Context("graceful node shutdown when PodDisruptionConditions are enabled [NodeFeature:PodDisruptionConditions]", func() {
 
@@ -173,6 +199,7 @@ var _ = SIGDescribe("GracefulNodeShutdown [Serial] [NodeFeature:GracefulNodeShut
 			initialConfig.FeatureGates = map[string]bool{
 				string(features.GracefulNodeShutdown):                   true,
 				string(features.GracefulNodeShutdownBasedOnPodPriority): false,
+				string(features.PodReadyToStartContainersCondition):     true,
 			}
 			initialConfig.ShutdownGracePeriod = metav1.Duration{Duration: nodeShutdownGracePeriod}
 			initialConfig.ShutdownGracePeriodCriticalPods = metav1.Duration{Duration: nodeShutdownGracePeriodCriticalPods}
@@ -301,6 +328,27 @@ var _ = SIGDescribe("GracefulNodeShutdown [Serial] [NodeFeature:GracefulNodeShut
 				podStatusUpdateTimeout+(nodeShutdownGracePeriod-nodeShutdownGracePeriodCriticalPods),
 				pollInterval).Should(gomega.Succeed())
 
+			ginkgo.By("Verify that all pod ready to start condition are set to false after terminating")
+			// All pod ready to start condition should set to false
+			gomega.Eventually(ctx, func(ctx context.Context) error {
+				list, err = e2epod.NewPodClient(f).List(ctx, metav1.ListOptions{
+					FieldSelector: nodeSelector,
+				})
+				if err != nil {
+					return err
+				}
+				gomega.Expect(list.Items).To(gomega.HaveLen(len(pods)))
+				for _, pod := range list.Items {
+					if !isPodReadyToStartConditionSetToFalse(&pod) {
+						framework.Logf("Expecting pod (%v/%v) 's ready to start condition set to false, "+
+							"but it's not currently: Pod Condition %+v", pod.Namespace, pod.Name, pod.Status.Conditions)
+						return fmt.Errorf("pod (%v/%v) 's ready to start condition should be false, condition: %s, phase: %s",
+							pod.Namespace, pod.Name, pod.Status.Conditions, pod.Status.Phase)
+					}
+				}
+				return nil
+			},
+			).Should(gomega.Succeed())
 		})
 
 		ginkgo.It("should be able to handle a cancelled shutdown", func(ctx context.Context) {
@@ -340,14 +388,14 @@ var _ = SIGDescribe("GracefulNodeShutdown [Serial] [NodeFeature:GracefulNodeShut
 			err = restartDbus()
 			framework.ExpectNoError(err)
 
-			// Wait a few seconds to ensure dbus is restarted...
-			time.Sleep(5 * time.Second)
-
-			ginkgo.By("Emitting Shutdown signal")
-			err = emitSignalPrepareForShutdown(true)
-			framework.ExpectNoError(err)
-
 			gomega.Eventually(ctx, func(ctx context.Context) error {
+				// re-send the shutdown signal in case the dbus restart is not done
+				ginkgo.By("Emitting Shutdown signal")
+				err = emitSignalPrepareForShutdown(true)
+				if err != nil {
+					return err
+				}
+
 				isReady := getNodeReadyStatus(ctx, f)
 				if isReady {
 					return fmt.Errorf("node did not become shutdown as expected")
@@ -560,6 +608,11 @@ func getPriorityClass(name string, value int32) *schedulingv1.PriorityClass {
 	}
 	return priority
 }
+
+// getGracePeriodOverrideTestPod returns a new Pod object containing a container
+// runs a shell script, hangs the process until a SIGTERM signal is received.
+// The script waits for $PID to ensure that the process does not exist.
+// If priorityClassName is scheduling.SystemNodeCritical, the Pod is marked as critical and a comment is added.
 func getGracePeriodOverrideTestPod(name string, node string, gracePeriod int64, priorityClassName string) *v1.Pod {
 	pod := &v1.Pod{
 		TypeMeta: metav1.TypeMeta{
@@ -576,13 +629,16 @@ func getGracePeriodOverrideTestPod(name string, node string, gracePeriod int64, 
 					Image:   busyboxImage,
 					Command: []string{"sh", "-c"},
 					Args: []string{`
-_term() {
-	echo "Caught SIGTERM signal!"
-	while true; do sleep 5; done
-}
-trap _term SIGTERM
-while true; do sleep 5; done
-`},
+					sleep 9999999 &
+					PID=$!
+					_term() {
+						echo "Caught SIGTERM signal!"
+						wait $PID
+					}
+					
+					trap _term SIGTERM
+					wait $PID
+					`},
 				},
 			},
 			TerminationGracePeriodSeconds: &gracePeriod,
@@ -688,4 +744,18 @@ func isPodShutdown(pod *v1.Pod) bool {
 // Pods should never report failed phase and have ready condition = true (https://github.com/kubernetes/kubernetes/issues/108594)
 func isPodStatusAffectedByIssue108594(pod *v1.Pod) bool {
 	return pod.Status.Phase == v1.PodFailed && podutils.IsPodReady(pod)
+}
+
+func isPodReadyToStartConditionSetToFalse(pod *v1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	readyToStartConditionSetToFalse := false
+	for _, cond := range pod.Status.Conditions {
+		if cond.Status == v1.ConditionFalse {
+			readyToStartConditionSetToFalse = true
+		}
+	}
+
+	return readyToStartConditionSetToFalse
 }

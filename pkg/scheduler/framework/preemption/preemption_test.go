@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/klog/v2/ktesting"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
@@ -47,6 +48,7 @@ import (
 	internalcache "k8s.io/kubernetes/pkg/scheduler/internal/cache"
 	internalqueue "k8s.io/kubernetes/pkg/scheduler/internal/queue"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
+	tf "k8s.io/kubernetes/pkg/scheduler/testing/framework"
 )
 
 var (
@@ -266,9 +268,10 @@ func TestDryRunPreemption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			registeredPlugins := append([]st.RegisterPluginFunc{
-				st.RegisterQueueSortPlugin(queuesort.Name, queuesort.New)},
-				st.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
+			logger, _ := ktesting.NewTestContext(t)
+			registeredPlugins := append([]tf.RegisterPluginFunc{
+				tf.RegisterQueueSortPlugin(queuesort.Name, queuesort.New)},
+				tf.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 			)
 			var objs []runtime.Object
 			for _, p := range append(tt.testPods, tt.initPods...) {
@@ -279,14 +282,17 @@ func TestDryRunPreemption(t *testing.T) {
 			}
 			informerFactory := informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(objs...), 0)
 			parallelism := parallelize.DefaultParallelism
-			ctx, cancel := context.WithCancel(context.Background())
+			_, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			fwk, err := st.NewFramework(
-				registeredPlugins, "", ctx.Done(),
+			fwk, err := tf.NewFramework(
+				ctx,
+				registeredPlugins, "",
 				frameworkruntime.WithPodNominator(internalqueue.NewPodNominator(informerFactory.Core().V1().Pods().Lister())),
 				frameworkruntime.WithInformerFactory(informerFactory),
 				frameworkruntime.WithParallelism(parallelism),
 				frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(tt.testPods, tt.nodes)),
+				frameworkruntime.WithLogger(logger),
 			)
 			if err != nil {
 				t.Fatal(err)

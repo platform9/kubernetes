@@ -315,10 +315,6 @@
           "resource": {
             "description": "Resource is the resource of the object being referenced.",
             "type": "string"
-          },
-          "uid": {
-            "description": "UID is the uid of the object being referenced.",
-            "type": "string"
           }
         },
         "type": "object"
@@ -646,11 +642,6 @@
             "group": "extensions",
             "kind": "DeleteOptions",
             "version": "v1beta1"
-          },
-          {
-            "group": "flowcontrol.apiserver.k8s.io",
-            "kind": "DeleteOptions",
-            "version": "v1alpha1"
           },
           {
             "group": "flowcontrol.apiserver.k8s.io",
@@ -1323,11 +1314,6 @@
           {
             "group": "flowcontrol.apiserver.k8s.io",
             "kind": "WatchEvent",
-            "version": "v1alpha1"
-          },
-          {
-            "group": "flowcontrol.apiserver.k8s.io",
-            "kind": "WatchEvent",
             "version": "v1beta1"
           },
           {
@@ -1844,7 +1830,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.networking.v1alpha1.ClusterCIDR"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2150,7 +2137,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2246,7 +2234,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.networking.v1alpha1.ClusterCIDR"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2652,7 +2641,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.networking.v1alpha1.IPAddress"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2958,7 +2948,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -3054,7 +3045,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.networking.v1alpha1.IPAddress"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {

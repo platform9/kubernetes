@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	componentbaseconfigv1alpha1 "k8s.io/component-base/config/v1alpha1"
+	logsapi "k8s.io/component-base/logs/api/v1"
 )
 
 // KubeProxyIPTablesConfiguration contains iptables-related configuration
@@ -84,6 +85,14 @@ type KubeProxyConntrackConfiguration struct {
 	// in CLOSE_WAIT state will remain in the conntrack
 	// table. (e.g. '60s'). Must be greater than 0 to set.
 	TCPCloseWaitTimeout *metav1.Duration `json:"tcpCloseWaitTimeout"`
+	// udpTimeout is how long an idle UDP conntrack entry in
+	// UNREPLIED state will remain in the conntrack table
+	// (e.g. '30s'). Must be greater than 0 to set.
+	UDPTimeout metav1.Duration `json:"udpTimeout"`
+	// udpStreamTimeout is how long an idle UDP conntrack entry in
+	// ASSURED state will remain in the conntrack table
+	// (e.g. '300s'). Must be greater than 0 to set.
+	UDPStreamTimeout metav1.Duration `json:"udpStreamTimeout"`
 }
 
 // KubeProxyWinkernelConfiguration contains Windows/HNS settings for
@@ -184,6 +193,10 @@ type KubeProxyConfiguration struct {
 	DetectLocalMode LocalMode `json:"detectLocalMode"`
 	// DetectLocal contains optional configuration settings related to DetectLocalMode.
 	DetectLocal DetectLocalConfiguration `json:"detectLocal"`
+	// logging specifies the options of logging.
+	// Refer to [Logs Options](https://github.com/kubernetes/component-base/blob/master/logs/options.go)
+	// for more information.
+	Logging logsapi.LoggingConfiguration `json:"logging,omitempty"`
 }
 
 // ProxyMode represents modes used by the Kubernetes proxy server.

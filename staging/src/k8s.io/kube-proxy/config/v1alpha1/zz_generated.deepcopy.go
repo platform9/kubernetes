@@ -70,6 +70,7 @@ func (in *KubeProxyConfiguration) DeepCopyInto(out *KubeProxyConfiguration) {
 	}
 	out.Winkernel = in.Winkernel
 	out.DetectLocal = in.DetectLocal
+	in.Logging.DeepCopyInto(&out.Logging)
 	return
 }
 
@@ -114,6 +115,8 @@ func (in *KubeProxyConntrackConfiguration) DeepCopyInto(out *KubeProxyConntrackC
 		*out = new(v1.Duration)
 		**out = **in
 	}
+	out.UDPTimeout = in.UDPTimeout
+	out.UDPStreamTimeout = in.UDPStreamTimeout
 	return
 }
 

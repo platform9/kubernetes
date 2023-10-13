@@ -78,7 +78,7 @@ type pvcval struct{}
 type PVCMap map[types.NamespacedName]pvcval
 
 // PersistentVolumeConfig is consumed by MakePersistentVolume() to generate a PV object
-// for varying storage options (NFS, ceph, glusterFS, etc.).
+// for varying storage options (NFS, ceph, etc.).
 // (+optional) prebind holds a pre-bound PVC
 // Example pvSource:
 //
@@ -648,7 +648,7 @@ func MakePersistentVolumeClaim(cfg PersistentVolumeClaimConfig, ns string) *v1.P
 		Spec: v1.PersistentVolumeClaimSpec{
 			Selector:    cfg.Selector,
 			AccessModes: cfg.AccessModes,
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceStorage: resource.MustParse(cfg.ClaimSize),
 				},

@@ -37,12 +37,12 @@ import (
 	kubeletpodresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/apis/podresources"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 	"k8s.io/kubernetes/pkg/kubelet/cm/memorymanager/state"
 	"k8s.io/kubernetes/pkg/kubelet/util"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	admissionapi "k8s.io/pod-security-admission/api"
+	"k8s.io/utils/cpuset"
 	"k8s.io/utils/pointer"
 
 	"github.com/onsi/ginkgo/v2"
@@ -254,7 +254,7 @@ var _ = SIGDescribe("Memory Manager [Disruptive] [Serial] [Feature:MemoryManager
 	)
 
 	f := framework.NewDefaultFramework("memory-manager-test")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	memoryQuantity := resource.MustParse("1100Mi")
 	defaultKubeParams := &kubeletParams{
@@ -382,7 +382,7 @@ var _ = SIGDescribe("Memory Manager [Disruptive] [Serial] [Feature:MemoryManager
 			endpoint, err := util.LocalEndpoint(defaultPodResourcesPath, podresources.Socket)
 			framework.ExpectNoError(err)
 
-			cli, conn, err := podresources.GetV1Client(endpoint, defaultPodResourcesTimeout, defaultPodResourcesMaxSize)
+			cli, conn, err := podresources.WaitForReady(podresources.GetClient(endpoint))
 			framework.ExpectNoError(err)
 			defer conn.Close()
 
@@ -522,7 +522,7 @@ var _ = SIGDescribe("Memory Manager [Disruptive] [Serial] [Feature:MemoryManager
 				endpoint, err := util.LocalEndpoint(defaultPodResourcesPath, podresources.Socket)
 				framework.ExpectNoError(err)
 
-				cli, conn, err := podresources.GetV1Client(endpoint, defaultPodResourcesTimeout, defaultPodResourcesMaxSize)
+				cli, conn, err := podresources.WaitForReady(podresources.GetClient(endpoint))
 				framework.ExpectNoError(err)
 				defer conn.Close()
 
@@ -627,7 +627,7 @@ var _ = SIGDescribe("Memory Manager [Disruptive] [Serial] [Feature:MemoryManager
 
 					return true
 				}, time.Minute, 5*time.Second).Should(
-					gomega.Equal(true),
+					gomega.BeTrue(),
 					"the pod succeeded to start, when it should fail with the admission error",
 				)
 			})
@@ -667,7 +667,7 @@ var _ = SIGDescribe("Memory Manager [Disruptive] [Serial] [Feature:MemoryManager
 				endpoint, err := util.LocalEndpoint(defaultPodResourcesPath, podresources.Socket)
 				framework.ExpectNoError(err)
 
-				cli, conn, err := podresources.GetV1Client(endpoint, defaultPodResourcesTimeout, defaultPodResourcesMaxSize)
+				cli, conn, err := podresources.WaitForReady(podresources.GetClient(endpoint))
 				framework.ExpectNoError(err)
 				defer conn.Close()
 
@@ -684,7 +684,7 @@ var _ = SIGDescribe("Memory Manager [Disruptive] [Serial] [Feature:MemoryManager
 				endpoint, err := util.LocalEndpoint(defaultPodResourcesPath, podresources.Socket)
 				framework.ExpectNoError(err)
 
-				cli, conn, err := podresources.GetV1Client(endpoint, defaultPodResourcesTimeout, defaultPodResourcesMaxSize)
+				cli, conn, err := podresources.WaitForReady(podresources.GetClient(endpoint))
 				framework.ExpectNoError(err)
 				defer conn.Close()
 

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -47,7 +48,7 @@ import (
 	corevalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/client"
-	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
+	netutils "k8s.io/utils/net"
 	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
@@ -112,6 +113,7 @@ func (podStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object
 func (podStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	pod := obj.(*api.Pod)
 	opts := podutil.GetValidationOptionsFromPodSpecAndMeta(&pod.Spec, nil, &pod.ObjectMeta, nil)
+	opts.ResourceIsPod = true
 	return corevalidation.ValidatePodCreate(pod, opts)
 }
 
@@ -141,6 +143,7 @@ func (podStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) 
 	pod := obj.(*api.Pod)
 	oldPod := old.(*api.Pod)
 	opts := podutil.GetValidationOptionsFromPodSpecAndMeta(&pod.Spec, &oldPod.Spec, &pod.ObjectMeta, &oldPod.ObjectMeta)
+	opts.ResourceIsPod = true
 	return corevalidation.ValidatePodUpdate(obj.(*api.Pod), old.(*api.Pod), opts)
 }
 
@@ -225,6 +228,7 @@ func (podStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Ob
 	pod := obj.(*api.Pod)
 	oldPod := old.(*api.Pod)
 	opts := podutil.GetValidationOptionsFromPodSpecAndMeta(&pod.Spec, &oldPod.Spec, &pod.ObjectMeta, &oldPod.ObjectMeta)
+	opts.ResourceIsPod = true
 
 	return corevalidation.ValidatePodStatusUpdate(obj.(*api.Pod), old.(*api.Pod), opts)
 }
@@ -264,6 +268,7 @@ func (podEphemeralContainersStrategy) ValidateUpdate(ctx context.Context, obj, o
 	newPod := obj.(*api.Pod)
 	oldPod := old.(*api.Pod)
 	opts := podutil.GetValidationOptionsFromPodSpecAndMeta(&newPod.Spec, &oldPod.Spec, &newPod.ObjectMeta, &oldPod.ObjectMeta)
+	opts.ResourceIsPod = true
 	return corevalidation.ValidatePodEphemeralContainersUpdate(newPod, oldPod, opts)
 }
 
@@ -394,8 +399,8 @@ func ResourceLocation(ctx context.Context, getter ResourceGetter, rt http.RoundT
 		}
 	}
 	podIP := getPodIP(pod)
-	if err := proxyutil.IsProxyableIP(podIP); err != nil {
-		return nil, nil, errors.NewBadRequest(err.Error())
+	if ip := netutils.ParseIPSloppy(podIP); ip == nil || !ip.IsGlobalUnicast() {
+		return nil, nil, errors.NewBadRequest("address not allowed")
 	}
 
 	loc := &url.URL{
@@ -682,7 +687,7 @@ func applyWaitingForSchedulingGatesCondition(pod *api.Pod) {
 	pod.Status.Conditions = append(pod.Status.Conditions, api.PodCondition{
 		Type:    api.PodScheduled,
 		Status:  api.ConditionFalse,
-		Reason:  api.PodReasonSchedulingGated,
+		Reason:  apiv1.PodReasonSchedulingGated,
 		Message: "Scheduling is blocked due to non-empty scheduling gates",
 	})
 }
