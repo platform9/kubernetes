@@ -61,7 +61,7 @@ type ContainerManager interface {
 	// CheckpointContainer checkpoints a container
 	CheckpointContainer(ctx context.Context, options *runtimeapi.CheckpointContainerRequest) error
 	// GetContainerEvents gets container events from the CRI runtime
-	GetContainerEvents(containerEventsCh chan *runtimeapi.ContainerEventResponse) error
+	GetContainerEvents(containerEventsCh chan *runtimeapi.ContainerEventResponse, connectionEstablishedCallback func(runtimeapi.RuntimeService_GetContainerEventsClient)) error
 }
 
 // PodSandboxManager contains methods for operating on PodSandboxes. The methods
@@ -131,6 +131,6 @@ type ImageManagerService interface {
 	PullImage(ctx context.Context, image *runtimeapi.ImageSpec, auth *runtimeapi.AuthConfig, podSandboxConfig *runtimeapi.PodSandboxConfig) (string, error)
 	// RemoveImage removes the image.
 	RemoveImage(ctx context.Context, image *runtimeapi.ImageSpec) error
-	// ImageFsInfo returns information of the filesystem that is used to store images.
-	ImageFsInfo(ctx context.Context) ([]*runtimeapi.FilesystemUsage, error)
+	// ImageFsInfo returns information of the filesystem(s) used to store the read-only layers and the writeable layer.
+	ImageFsInfo(ctx context.Context) (*runtimeapi.ImageFsInfoResponse, error)
 }

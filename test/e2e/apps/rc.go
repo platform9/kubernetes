@@ -68,7 +68,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 		Description: Replication Controller MUST create a Pod with Basic Image and MUST run the service with the provided image. Image MUST be tested by dialing into the service listening through TCP, UDP and HTTP.
 	*/
 	framework.ConformanceIt("should serve a basic image on each replica with a public image", func(ctx context.Context) {
-		TestReplicationControllerServeImageOrFail(ctx, f, "basic", framework.ServeHostnameImage)
+		TestReplicationControllerServeImageOrFail(ctx, f, "basic", imageutils.GetE2EImage(imageutils.Agnhost))
 	})
 
 	ginkgo.It("should serve a basic image on each replica with a private image", func(ctx context.Context) {
@@ -433,7 +433,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 		_, err := rcClient.Create(ctx, rc, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "Failed to create ReplicationController: %v", err)
 
-		err = wait.PollImmediateWithContext(ctx, 1*time.Second, 1*time.Minute, checkReplicationControllerStatusReplicaCount(f, rcName, initialRCReplicaCount))
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 1*time.Minute, true, checkReplicationControllerStatusReplicaCount(f, rcName, initialRCReplicaCount))
 		framework.ExpectNoError(err, "failed to confirm the quantity of ReplicationController replicas")
 
 		ginkgo.By(fmt.Sprintf("Getting scale subresource for ReplicationController %q", rcName))
@@ -448,7 +448,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 		framework.ExpectNoError(err, "Failed to update scale subresource: %v", err)
 
 		ginkgo.By(fmt.Sprintf("Verifying replicas where modified for replication controller %q", rcName))
-		err = wait.PollImmediateWithContext(ctx, 1*time.Second, 1*time.Minute, checkReplicationControllerStatusReplicaCount(f, rcName, expectedRCReplicaCount))
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 1*time.Minute, true, checkReplicationControllerStatusReplicaCount(f, rcName, expectedRCReplicaCount))
 		framework.ExpectNoError(err, "failed to confirm the quantity of ReplicationController replicas")
 	})
 })

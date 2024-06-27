@@ -29,6 +29,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -39,7 +40,7 @@ import (
 
 	bootstraptokenv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/bootstraptoken/v1"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	kubeadmcmdoptions "k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
@@ -72,8 +73,11 @@ func ValidateClusterConfiguration(c *kubeadm.ClusterConfiguration) field.ErrorLi
 	allErrs = append(allErrs, ValidateHostPort(c.ControlPlaneEndpoint, field.NewPath("controlPlaneEndpoint"))...)
 	allErrs = append(allErrs, ValidateImageRepository(c.ImageRepository, field.NewPath("imageRepository"))...)
 	allErrs = append(allErrs, ValidateEtcd(&c.Etcd, field.NewPath("etcd"))...)
-	allErrs = append(allErrs, ValidateEncryptionAlgorithm(string(c.EncryptionAlgorithm), field.NewPath("encryptionAlgorithm"))...)
+	allErrs = append(allErrs, ValidateEncryptionAlgorithm(c.EncryptionAlgorithm, field.NewPath("encryptionAlgorithm"))...)
 	allErrs = append(allErrs, componentconfigs.Validate(c)...)
+	for _, certError := range ValidateCertValidity(c) {
+		klog.Warningf("WARNING: %s", certError.Error())
+	}
 	return allErrs
 }
 
@@ -135,6 +139,7 @@ func ValidateNodeRegistrationOptions(nro *kubeadm.NodeRegistrationOptions, fldPa
 	}
 	allErrs = append(allErrs, ValidateSocketPath(nro.CRISocket, fldPath.Child("criSocket"))...)
 	allErrs = append(allErrs, ValidateExtraArgs(nro.KubeletExtraArgs, fldPath.Child("kubeletExtraArgs"))...)
+	allErrs = append(allErrs, ValidateImagePullPolicy(nro.ImagePullPolicy, fldPath.Child("imagePullPolicy"))...)
 	// TODO: Maybe validate .Taints as well in the future using something like validateNodeTaints() in pkg/apis/core/validation
 	return allErrs
 }
@@ -339,11 +344,16 @@ func ValidateEtcd(e *kubeadm.Etcd, fldPath *field.Path) field.ErrorList {
 }
 
 // ValidateEncryptionAlgorithm validates the public key algorithm
-func ValidateEncryptionAlgorithm(algo string, fldPath *field.Path) field.ErrorList {
+func ValidateEncryptionAlgorithm(algo kubeadm.EncryptionAlgorithmType, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if algo != string(kubeadm.EncryptionAlgorithmRSA) && algo != string(kubeadm.EncryptionAlgorithmECDSA) {
-		msg := fmt.Sprintf("Invalid encryption algorithm. Must be %q or %q",
-			kubeadm.EncryptionAlgorithmRSA, kubeadm.EncryptionAlgorithmECDSA)
+	knownAlgorithms := sets.New(
+		kubeadm.EncryptionAlgorithmECDSAP256,
+		kubeadm.EncryptionAlgorithmRSA2048,
+		kubeadm.EncryptionAlgorithmRSA3072,
+		kubeadm.EncryptionAlgorithmRSA4096,
+	)
+	if !knownAlgorithms.Has(algo) {
+		msg := fmt.Sprintf("Invalid encryption algorithm %q. Must be one of %v", algo, sets.List(knownAlgorithms))
 		allErrs = append(allErrs, field.Invalid(fldPath, algo, msg))
 	}
 	return allErrs
@@ -599,7 +609,7 @@ func isAllowedFlag(flagName string) bool {
 		kubeadmcmdoptions.NodeName,
 		kubeadmcmdoptions.KubeconfigDir,
 		kubeadmcmdoptions.UploadCerts,
-		"print-join-command", "rootfs", "v", "log-file")
+		"print-join-command", "rootfs", "v", "log-file", "yes")
 	if allowedFlags.Has(flagName) {
 		return true
 	}
@@ -707,6 +717,7 @@ func ValidateResetConfiguration(c *kubeadm.ResetConfiguration) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, ValidateSocketPath(c.CRISocket, field.NewPath("criSocket"))...)
 	allErrs = append(allErrs, ValidateAbsolutePath(c.CertificatesDir, field.NewPath("certificatesDir"))...)
+	allErrs = append(allErrs, ValidateUnmountFlags(c.UnmountFlags, field.NewPath("unmountFlags"))...)
 	return allErrs
 }
 
@@ -720,5 +731,67 @@ func ValidateExtraArgs(args []kubeadm.Arg, fldPath *field.Path) field.ErrorList 
 		}
 	}
 
+	return allErrs
+}
+
+// ValidateUnmountFlags validates a set of unmount flags and collects all encountered errors
+func ValidateUnmountFlags(flags []string, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	for idx, flag := range flags {
+		switch flag {
+		case kubeadm.UnmountFlagMNTForce, kubeadm.UnmountFlagMNTDetach, kubeadm.UnmountFlagMNTExpire, kubeadm.UnmountFlagUmountNoFollow:
+			continue
+		default:
+			allErrs = append(allErrs, field.Invalid(fldPath, fmt.Sprintf("index %d", idx), fmt.Sprintf("unknown unmount flag %s", flag)))
+		}
+	}
+
+	return allErrs
+}
+
+// ValidateImagePullPolicy validates if the user specified pull policy is correct
+func ValidateImagePullPolicy(policy corev1.PullPolicy, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	switch policy {
+	case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		return allErrs
+	default:
+		allErrs = append(allErrs, field.Invalid(fldPath, policy, "invalid pull policy"))
+		return allErrs
+	}
+}
+
+// ValidateUpgradeConfiguration validates a UpgradeConfiguration object and collects all encountered errors
+func ValidateUpgradeConfiguration(c *kubeadm.UpgradeConfiguration) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if c.Apply.Patches != nil {
+		allErrs = append(allErrs, ValidateAbsolutePath(c.Apply.Patches.Directory,
+			field.NewPath("apply").Child("patches").Child("directory"))...)
+	}
+	if c.Node.Patches != nil {
+		allErrs = append(allErrs, ValidateAbsolutePath(c.Node.Patches.Directory,
+			field.NewPath("node").Child("patches").Child("directory"))...)
+	}
+	allErrs = append(allErrs, ValidateImagePullPolicy(c.Apply.ImagePullPolicy,
+		field.NewPath("apply").Child("imagePullPolicy"))...)
+	allErrs = append(allErrs, ValidateImagePullPolicy(c.Node.ImagePullPolicy,
+		field.NewPath("node").Child("imagePullPolicy"))...)
+	return allErrs
+}
+
+// ValidateCertValidity validates if the values for cert validity are too big
+func ValidateCertValidity(cfg *kubeadm.ClusterConfiguration) []error {
+	var allErrs []error
+	if cfg.CertificateValidityPeriod != nil && cfg.CertificateValidityPeriod.Duration > constants.CertificateValidityPeriod {
+		allErrs = append(allErrs,
+			errors.Errorf("certificateValidityPeriod: the value %v is more than the recommended default for certificate expiration: %v",
+				cfg.CertificateValidityPeriod.Duration, constants.CertificateValidityPeriod))
+	}
+	if cfg.CACertificateValidityPeriod != nil && cfg.CACertificateValidityPeriod.Duration > constants.CACertificateValidityPeriod {
+		allErrs = append(allErrs,
+			errors.Errorf("caCertificateValidityPeriod: the value %v is more than the recommended default for CA certificate expiration: %v",
+				cfg.CACertificateValidityPeriod.Duration, constants.CACertificateValidityPeriod))
+	}
 	return allErrs
 }

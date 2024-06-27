@@ -88,17 +88,17 @@ func TestListImages(t *testing.T) {
 	assert.NoError(t, err)
 
 	images := []string{"1111", "2222", "3333"}
-	expected := sets.NewString(images...)
+	expected := sets.New[string](images...)
 	fakeImageService.SetFakeImages(images)
 
 	actualImages, err := fakeManager.ListImages(ctx)
 	assert.NoError(t, err)
-	actual := sets.NewString()
+	actual := sets.New[string]()
 	for _, i := range actualImages {
 		actual.Insert(i.ID)
 	}
 
-	assert.Equal(t, expected.List(), actual.List())
+	assert.Equal(t, sets.List(expected), sets.List(actual))
 }
 
 func TestListImagesPinnedField(t *testing.T) {
@@ -147,6 +147,20 @@ func TestGetImageRef(t *testing.T) {
 	imageRef, err := fakeManager.GetImageRef(ctx, kubecontainer.ImageSpec{Image: image})
 	assert.NoError(t, err)
 	assert.Equal(t, image, imageRef)
+}
+
+func TestImageSize(t *testing.T) {
+	ctx := context.Background()
+	_, fakeImageService, fakeManager, err := createTestRuntimeManager()
+	assert.NoError(t, err)
+
+	const imageSize = uint64(64)
+	fakeImageService.SetFakeImageSize(imageSize)
+	image := "busybox"
+	fakeImageService.SetFakeImages([]string{image})
+	actualSize, err := fakeManager.GetImageSize(ctx, kubecontainer.ImageSpec{Image: image})
+	assert.NoError(t, err)
+	assert.Equal(t, imageSize, actualSize)
 }
 
 func TestGetImageRefImageNotAvailableLocally(t *testing.T) {

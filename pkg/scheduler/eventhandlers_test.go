@@ -26,9 +26,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
+	resourcev1alpha2 "k8s.io/api/resource/v1alpha2"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/klog/v2/ktesting"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,6 +41,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeaffinity"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodename"
@@ -46,6 +50,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/internal/cache"
 	"k8s.io/kubernetes/pkg/scheduler/internal/queue"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
+	"k8s.io/kubernetes/pkg/scheduler/util/assumecache"
 )
 
 func TestNodeAllocatableChanged(t *testing.T) {
@@ -362,6 +367,7 @@ func TestAddAllEventHandlers(t *testing.T) {
 	tests := []struct {
 		name                   string
 		gvkMap                 map[framework.GVK]framework.ActionType
+		enableDRA              bool
 		expectStaticInformers  map[reflect.Type]bool
 		expectDynamicInformers map[schema.GroupVersionResource]bool
 	}{
@@ -372,6 +378,44 @@ func TestAddAllEventHandlers(t *testing.T) {
 				reflect.TypeOf(&v1.Pod{}):       true,
 				reflect.TypeOf(&v1.Node{}):      true,
 				reflect.TypeOf(&v1.Namespace{}): true,
+			},
+			expectDynamicInformers: map[schema.GroupVersionResource]bool{},
+		},
+		{
+			name: "DRA events disabled",
+			gvkMap: map[framework.GVK]framework.ActionType{
+				framework.PodSchedulingContext:    framework.Add,
+				framework.ResourceClaim:           framework.Add,
+				framework.ResourceClass:           framework.Add,
+				framework.ResourceClaimParameters: framework.Add,
+				framework.ResourceClassParameters: framework.Add,
+			},
+			expectStaticInformers: map[reflect.Type]bool{
+				reflect.TypeOf(&v1.Pod{}):       true,
+				reflect.TypeOf(&v1.Node{}):      true,
+				reflect.TypeOf(&v1.Namespace{}): true,
+			},
+			expectDynamicInformers: map[schema.GroupVersionResource]bool{},
+		},
+		{
+			name: "DRA events enabled",
+			gvkMap: map[framework.GVK]framework.ActionType{
+				framework.PodSchedulingContext:    framework.Add,
+				framework.ResourceClaim:           framework.Add,
+				framework.ResourceClass:           framework.Add,
+				framework.ResourceClaimParameters: framework.Add,
+				framework.ResourceClassParameters: framework.Add,
+			},
+			enableDRA: true,
+			expectStaticInformers: map[reflect.Type]bool{
+				reflect.TypeOf(&v1.Pod{}):                                   true,
+				reflect.TypeOf(&v1.Node{}):                                  true,
+				reflect.TypeOf(&v1.Namespace{}):                             true,
+				reflect.TypeOf(&resourcev1alpha2.PodSchedulingContext{}):    true,
+				reflect.TypeOf(&resourcev1alpha2.ResourceClaim{}):           true,
+				reflect.TypeOf(&resourcev1alpha2.ResourceClaimParameters{}): true,
+				reflect.TypeOf(&resourcev1alpha2.ResourceClass{}):           true,
+				reflect.TypeOf(&resourcev1alpha2.ResourceClassParameters{}): true,
 			},
 			expectDynamicInformers: map[schema.GroupVersionResource]bool{},
 		},
@@ -433,6 +477,7 @@ func TestAddAllEventHandlers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DynamicResourceAllocation, tt.enableDRA)
 			logger, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
@@ -447,8 +492,13 @@ func TestAddAllEventHandlers(t *testing.T) {
 
 			dynclient := dyfake.NewSimpleDynamicClient(scheme)
 			dynInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynclient, 0)
+			var resourceClaimCache *assumecache.AssumeCache
+			if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
+				resourceClaimInformer := informerFactory.Resource().V1alpha2().ResourceClaims().Informer()
+				resourceClaimCache = assumecache.NewAssumeCache(logger, resourceClaimInformer, "ResourceClaim", "", nil)
+			}
 
-			if err := addAllEventHandlers(&testSched, informerFactory, dynInformerFactory, tt.gvkMap); err != nil {
+			if err := addAllEventHandlers(&testSched, informerFactory, dynInformerFactory, resourceClaimCache, tt.gvkMap); err != nil {
 				t.Fatalf("Add event handlers failed, error = %v", err)
 			}
 
@@ -522,5 +572,93 @@ func TestAdmissionCheck(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNodeSchedulingPropertiesChange(t *testing.T) {
+	testCases := []struct {
+		name       string
+		newNode    *v1.Node
+		oldNode    *v1.Node
+		wantEvents []framework.ClusterEvent
+	}{
+		{
+			name:       "no specific changed applied",
+			newNode:    st.MakeNode().Unschedulable(false).Obj(),
+			oldNode:    st.MakeNode().Unschedulable(false).Obj(),
+			wantEvents: nil,
+		},
+		{
+			name:       "only node spec unavailable changed",
+			newNode:    st.MakeNode().Unschedulable(false).Obj(),
+			oldNode:    st.MakeNode().Unschedulable(true).Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeSpecUnschedulableChange},
+		},
+		{
+			name: "only node allocatable changed",
+			newNode: st.MakeNode().Capacity(map[v1.ResourceName]string{
+				v1.ResourceCPU:                     "1000m",
+				v1.ResourceMemory:                  "100m",
+				v1.ResourceName("example.com/foo"): "1"},
+			).Obj(),
+			oldNode: st.MakeNode().Capacity(map[v1.ResourceName]string{
+				v1.ResourceCPU:                     "1000m",
+				v1.ResourceMemory:                  "100m",
+				v1.ResourceName("example.com/foo"): "2"},
+			).Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeAllocatableChange},
+		},
+		{
+			name:       "only node label changed",
+			newNode:    st.MakeNode().Label("foo", "bar").Obj(),
+			oldNode:    st.MakeNode().Label("foo", "fuz").Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeLabelChange},
+		},
+		{
+			name: "only node taint changed",
+			newNode: st.MakeNode().Taints([]v1.Taint{
+				{Key: v1.TaintNodeUnschedulable, Value: "", Effect: v1.TaintEffectNoSchedule},
+			}).Obj(),
+			oldNode: st.MakeNode().Taints([]v1.Taint{
+				{Key: v1.TaintNodeUnschedulable, Value: "foo", Effect: v1.TaintEffectNoSchedule},
+			}).Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeTaintChange},
+		},
+		{
+			name:       "only node annotation changed",
+			newNode:    st.MakeNode().Annotation("foo", "bar").Obj(),
+			oldNode:    st.MakeNode().Annotation("foo", "fuz").Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeAnnotationChange},
+		},
+		{
+			name:    "only node condition changed",
+			newNode: st.MakeNode().Obj(),
+			oldNode: st.MakeNode().Condition(
+				v1.NodeReady,
+				v1.ConditionTrue,
+				"Ready",
+				"Ready",
+			).Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeConditionChange},
+		},
+		{
+			name: "both node label and node taint changed",
+			newNode: st.MakeNode().
+				Label("foo", "bar").
+				Taints([]v1.Taint{
+					{Key: v1.TaintNodeUnschedulable, Value: "", Effect: v1.TaintEffectNoSchedule},
+				}).Obj(),
+			oldNode: st.MakeNode().Taints([]v1.Taint{
+				{Key: v1.TaintNodeUnschedulable, Value: "foo", Effect: v1.TaintEffectNoSchedule},
+			}).Obj(),
+			wantEvents: []framework.ClusterEvent{queue.NodeLabelChange, queue.NodeTaintChange},
+		},
+	}
+
+	for _, tc := range testCases {
+		gotEvents := nodeSchedulingPropertiesChange(tc.newNode, tc.oldNode)
+		if diff := cmp.Diff(tc.wantEvents, gotEvents); diff != "" {
+			t.Errorf("unexpected event (-want, +got):\n%s", diff)
+		}
 	}
 }

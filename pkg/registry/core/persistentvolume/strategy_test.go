@@ -18,6 +18,7 @@ package persistentvolume
 
 import (
 	"context"
+
 	"github.com/google/go-cmp/cmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -46,9 +47,9 @@ func TestStatusUpdate(t *testing.T) {
 	now := metav1.Now()
 	origin := metav1.NewTime(now.Add(time.Hour))
 	later := metav1.NewTime(now.Add(time.Hour * 2))
-	nowFunc = func() metav1.Time { return now }
+	NowFunc = func() metav1.Time { return now }
 	defer func() {
-		nowFunc = metav1.Now
+		NowFunc = metav1.Now
 	}()
 	tests := []struct {
 		name        string
@@ -363,7 +364,7 @@ func TestStatusUpdate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PersistentVolumeLastPhaseTransitionTime, tc.fg)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PersistentVolumeLastPhaseTransitionTime, tc.fg)
 
 			obj := tc.newObj.DeepCopy()
 			StatusStrategy.PrepareForUpdate(context.TODO(), obj, tc.oldObj.DeepCopy())
@@ -376,9 +377,9 @@ func TestStatusUpdate(t *testing.T) {
 
 func TestStatusCreate(t *testing.T) {
 	now := metav1.Now()
-	nowFunc = func() metav1.Time { return now }
+	NowFunc = func() metav1.Time { return now }
 	defer func() {
-		nowFunc = metav1.Now
+		NowFunc = metav1.Now
 	}()
 	tests := []struct {
 		name        string
@@ -423,7 +424,7 @@ func TestStatusCreate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PersistentVolumeLastPhaseTransitionTime, tc.fg)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PersistentVolumeLastPhaseTransitionTime, tc.fg)
 			obj := tc.newObj.DeepCopy()
 			StatusStrategy.PrepareForCreate(context.TODO(), obj)
 			if !reflect.DeepEqual(obj, tc.expectedObj) {

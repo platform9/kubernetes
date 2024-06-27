@@ -136,23 +136,18 @@ func NewDefaultKubectlCommandWithArgs(o KubectlOptions) *cobra.Command {
 			case "help", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
 				// Don't search for a plugin
 			default:
-				if err := HandlePluginCommand(o.PluginHandler, cmdPathPieces, false); err != nil {
+				if err := HandlePluginCommand(o.PluginHandler, cmdPathPieces, 1); err != nil {
 					fmt.Fprintf(o.IOStreams.ErrOut, "Error: %v\n", err)
 					os.Exit(1)
 				}
 			}
 		} else if err == nil {
-			if cmdutil.CmdPluginAsSubcommand.IsEnabled() {
+			if !cmdutil.CmdPluginAsSubcommand.IsDisabled() {
 				// Command exists(e.g. kubectl create), but it is not certain that
 				// subcommand also exists (e.g. kubectl create networkpolicy)
-				if IsSubcommandPluginAllowed(foundCmd.Name()) {
-					var subcommand string
-					for _, arg := range foundArgs { // first "non-flag" argument as subcommand
-						if !strings.HasPrefix(arg, "-") {
-							subcommand = arg
-							break
-						}
-					}
+				// we also have to eliminate kubectl create -f
+				if IsSubcommandPluginAllowed(foundCmd.Name()) && len(foundArgs) >= 1 && !strings.HasPrefix(foundArgs[0], "-") {
+					subcommand := foundArgs[0]
 					builtinSubcmdExist := false
 					for _, subcmd := range foundCmd.Commands() {
 						if subcmd.Name() == subcommand {
@@ -162,7 +157,7 @@ func NewDefaultKubectlCommandWithArgs(o KubectlOptions) *cobra.Command {
 					}
 
 					if !builtinSubcmdExist {
-						if err := HandlePluginCommand(o.PluginHandler, cmdPathPieces, true); err != nil {
+						if err := HandlePluginCommand(o.PluginHandler, cmdPathPieces, len(cmdPathPieces)-len(foundArgs)+1); err != nil {
 							fmt.Fprintf(o.IOStreams.ErrOut, "Error: %v\n", err)
 							os.Exit(1)
 						}
@@ -264,7 +259,7 @@ func (h *DefaultPluginHandler) Execute(executablePath string, cmdArgs, environme
 
 // HandlePluginCommand receives a pluginHandler and command-line arguments and attempts to find
 // a plugin executable on the PATH that satisfies the given arguments.
-func HandlePluginCommand(pluginHandler PluginHandler, cmdArgs []string, exactMatch bool) error {
+func HandlePluginCommand(pluginHandler PluginHandler, cmdArgs []string, minArgs int) error {
 	var remainingArgs []string // all "non-flag" arguments
 	for _, arg := range cmdArgs {
 		if strings.HasPrefix(arg, "-") {
@@ -284,13 +279,14 @@ func HandlePluginCommand(pluginHandler PluginHandler, cmdArgs []string, exactMat
 	for len(remainingArgs) > 0 {
 		path, found := pluginHandler.Lookup(strings.Join(remainingArgs, "-"))
 		if !found {
-			if exactMatch {
-				// if exactMatch is true, we shouldn't continue searching with shorter names.
+			remainingArgs = remainingArgs[:len(remainingArgs)-1]
+			if len(remainingArgs) < minArgs {
+				// we shouldn't continue searching with shorter names.
 				// this is especially for not searching kubectl-create plugin
 				// when kubectl-create-foo plugin is not found.
 				break
 			}
-			remainingArgs = remainingArgs[:len(remainingArgs)-1]
+
 			continue
 		}
 

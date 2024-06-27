@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	genericfeatures "k8s.io/apiserver/pkg/features"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	clientfeatures "k8s.io/client-go/features"
 	"k8s.io/component-base/featuregate"
 )
 
@@ -58,21 +59,18 @@ const (
 	// Enables usage of any object for volume data source in PVCs
 	AnyVolumeDataSource featuregate.Feature = "AnyVolumeDataSource"
 
-	// owner: @nabokihms
-	// alpha: v1.26
-	// beta: v1.27
-	// GA: v1.28
-	//
-	// Enables API to get self subject attributes after authentication.
-	APISelfSubjectReview featuregate.Feature = "APISelfSubjectReview"
-
 	// owner: @tallclair
 	// beta: v1.4
 	AppArmor featuregate.Feature = "AppArmor"
 
+	// owner: @tallclair
+	// beta: v1.30
+	AppArmorFields featuregate.Feature = "AppArmorFields"
+
 	// owner: @danwinship
 	// alpha: v1.27
 	// beta: v1.29
+	// GA: v1.30
 	//
 	// Enables dual-stack --node-ip in kubelet with external cloud providers
 	CloudDualStackNodeIPs featuregate.Feature = "CloudDualStackNodeIPs"
@@ -82,6 +80,12 @@ const (
 	//
 	// Enable ClusterTrustBundle objects and Kubelet integration.
 	ClusterTrustBundle featuregate.Feature = "ClusterTrustBundle"
+
+	// owner: @ahmedtd
+	// alpha: v1.28
+	//
+	// Enable ClusterTrustBundle Kubelet projected volumes.  Depends on ClusterTrustBundle.
+	ClusterTrustBundleProjection featuregate.Feature = "ClusterTrustBundleProjection"
 
 	// owner: @szuecs
 	// alpha: v1.12
@@ -131,46 +135,14 @@ const (
 	// Allow the usage of options to fine-tune the cpumanager policies.
 	CPUManagerPolicyOptions featuregate.Feature = "CPUManagerPolicyOptions"
 
-	// owner: @andyzhangx
-	// alpha: v1.15
-	// beta: v1.21
-	// GA: v1.26
-	//
-	// Enables the Azure File in-tree driver to Azure File Driver migration feature.
-	CSIMigrationAzureFile featuregate.Feature = "CSIMigrationAzureFile"
-
-	// owner: @mfordjody
-	// alpha: v1.26
-	//
-	// Skip validation Enable in next version
-	SkipReadOnlyValidationGCE featuregate.Feature = "SkipReadOnlyValidationGCE"
-
 	// owner: @trierra
+	// kep:  http://kep.k8s.io/2589
 	// alpha: v1.23
+	// beta: v1.25 (off by default)
+	// beta: v1.31 (on by default)
 	//
 	// Enables the Portworx in-tree driver to Portworx migration feature.
 	CSIMigrationPortworx featuregate.Feature = "CSIMigrationPortworx"
-
-	// owner: @humblec
-	// alpha: v1.23
-	// deprecated: v1.28
-	//
-	// Enables the RBD in-tree driver to RBD CSI Driver  migration feature.
-	CSIMigrationRBD featuregate.Feature = "CSIMigrationRBD"
-
-	// owner: @divyenpatel
-	// beta: v1.19 (requires: vSphere vCenter/ESXi Version: 7.0u2, HW Version: VM version 15)
-	// GA: 1.26
-	// Enables the vSphere in-tree driver to vSphere CSI Driver migration feature.
-	CSIMigrationvSphere featuregate.Feature = "CSIMigrationvSphere"
-
-	// owner: @humblec, @zhucan
-	// kep: https://kep.k8s.io/3171
-	// alpha: v1.25
-	// beta: v1.27
-	//
-	// Enables SecretRef field in CSI NodeExpandVolume request.
-	CSINodeExpandSecret featuregate.Feature = "CSINodeExpandSecret"
 
 	// owner: @fengzixu
 	// alpha: v1.21
@@ -187,42 +159,21 @@ const (
 	// owner: @adrianreber
 	// kep: https://kep.k8s.io/2008
 	// alpha: v1.25
+	// beta: v1.30
 	//
 	// Enables container Checkpoint support in the kubelet
 	ContainerCheckpoint featuregate.Feature = "ContainerCheckpoint"
-
-	// owner: @bhcleek @wzshiming
-	// GA: v1.25
-	//
-	// Normalize HttpGet URL and Header passing for lifecycle handlers with probers.
-	ConsistentHTTPGetHandlers featuregate.Feature = "ConsistentHTTPGetHandlers"
 
 	// owner: @helayoty
 	// beta: v1.28
 	// Set the scheduled time as an annotation in the job.
 	CronJobsScheduledAnnotation featuregate.Feature = "CronJobsScheduledAnnotation"
 
-	// owner: @deejross, @soltysh
-	// kep: https://kep.k8s.io/3140
-	// alpha: v1.24
-	// beta: v1.25
-	// GA: 1.27
-	//
-	// Enables support for time zones in CronJobs.
-	CronJobTimeZone featuregate.Feature = "CronJobTimeZone"
-
-	// owner: @thockin
-	// deprecated: v1.28
-	//
-	// Changes when the default value of PodSpec.containers[].ports[].hostPort
-	// is assigned.  The default is to only set a default value in Pods.
-	// Enabling this means a default will be assigned even to embeddedPodSpecs
-	// (e.g. in a Deployment), which is the historical default.
-	DefaultHostNetworkHostPortsInPodTemplates featuregate.Feature = "DefaultHostNetworkHostPortsInPodTemplates"
-
 	// owner: @elezar
 	// kep: http://kep.k8s.io/4009
 	// alpha: v1.28
+	// beta: v1.29
+	// GA: v1.31
 	//
 	// Add support for CDI Device IDs in the Device Plugin API.
 	DevicePluginCDIDevices featuregate.Feature = "DevicePluginCDIDevices"
@@ -230,6 +181,7 @@ const (
 	// owner: @andrewsykim
 	// alpha: v1.22
 	// beta: v1.29
+	// GA: v1.31
 	//
 	// Disable any functionality in kube-apiserver, kube-controller-manager and kubelet related to the `--cloud-provider` component flag.
 	DisableCloudProviders featuregate.Feature = "DisableCloudProviders"
@@ -241,13 +193,12 @@ const (
 	// Disable in-tree functionality in kubelet to authenticate to cloud provider container registries for image pull credentials.
 	DisableKubeletCloudCredentialProviders featuregate.Feature = "DisableKubeletCloudCredentialProviders"
 
-	// owner: @derekwaynecarr
-	// alpha: v1.20
-	// beta: v1.21 (off by default until 1.22)
-	// ga: v1.27
-	//
-	// Enables usage of hugepages-<size> in downward API.
-	DownwardAPIHugePages featuregate.Feature = "DownwardAPIHugePages"
+	// owner: @HirazawaUi
+	// kep: http://kep.k8s.io/4004
+	// alpha: v1.29
+	// beta: v1.31
+	// DisableNodeKubeProxyVersion disable the status.nodeInfo.kubeProxyVersion field of v1.Node
+	DisableNodeKubeProxyVersion featuregate.Feature = "DisableNodeKubeProxyVersion"
 
 	// owner: @pohly
 	// kep: http://kep.k8s.io/3063
@@ -260,7 +211,6 @@ const (
 	// owner: @harche
 	// kep: http://kep.k8s.io/3386
 	// alpha: v1.25
-	// beta: v1.27
 	//
 	// Allows using event-driven PLEG (pod lifecycle event generator) through kubelet
 	// which avoids frequent relisting of containers which helps optimize performance.
@@ -274,30 +224,11 @@ const (
 	// Lock to default and remove after v1.22 based on user feedback that should be reflected in KEP #1972 update
 	ExecProbeTimeout featuregate.Feature = "ExecProbeTimeout"
 
-	// owner: @gjkim42
-	// kep: https://kep.k8s.io/2595
-	// alpha: v1.22
-	// beta: v1.26
-	// GA: v1.28
-	//
-	// Enables apiserver and kubelet to allow up to 32 DNSSearchPaths and up to 2048 DNSSearchListChars.
-	ExpandedDNSConfig featuregate.Feature = "ExpandedDNSConfig"
-
-	// owner: @pweil-
-	// alpha: v1.5
-	// deprecated: v1.28
-	//
-	// This flag used to be needed for dockershim CRI and currently does nothing.
-	ExperimentalHostUserNamespaceDefaultingGate featuregate.Feature = "ExperimentalHostUserNamespaceDefaulting"
-
-	// owner: @yuzhiquan, @bowei, @PxyUp, @SergeyKanzhelev
-	// kep: https://kep.k8s.io/2727
-	// alpha: v1.23
-	// beta: v1.24
-	// stable: v1.27
-	//
-	// Enables GRPC probe method for {Liveness,Readiness,Startup}Probe.
-	GRPCContainerProbe featuregate.Feature = "GRPCContainerProbe"
+	// owner: @jpbetz
+	// alpha: v1.30
+	// Resource create requests using generateName are retried automatically by the apiserver
+	// if the generated name conflicts with an existing resource name, up to a maximum number of 7 retries.
+	RetryGenerateName featuregate.Feature = "RetryGenerateName"
 
 	// owner: @bobbypage
 	// alpha: v1.20
@@ -315,6 +246,7 @@ const (
 	// kep: https://kep.k8s.io/1610
 	// alpha: v1.20
 	// beta:  v1.27
+	// GA:  v1.30
 	//
 	// Add support for the HPA to scale based on metrics from individual containers
 	// in target pods
@@ -327,8 +259,9 @@ const (
 	HPAScaleToZero featuregate.Feature = "HPAScaleToZero"
 
 	// owner: @deepakkinni @xing-yang
-	// kep: https://kep.k8s.io/2680
+	// kep: https://kep.k8s.io/2644
 	// alpha: v1.23
+	// beta: v1.31
 	//
 	// Honor Persistent Volume Reclaim Policy when it is "Delete" irrespective of PV-PVC
 	// deletion ordering.
@@ -370,43 +303,26 @@ const (
 	// Disables the Portworx in-tree driver.
 	InTreePluginPortworxUnregister featuregate.Feature = "InTreePluginPortworxUnregister"
 
-	// owner: @humblec
-	// alpha: v1.23
-	// deprecated: v1.28
-	//
-	// Disables the RBD in-tree driver.
-	InTreePluginRBDUnregister featuregate.Feature = "InTreePluginRBDUnregister"
-
 	// owner: @divyenpatel
 	// alpha: v1.21
 	//
 	// Disables the vSphere in-tree driver.
 	InTreePluginvSphereUnregister featuregate.Feature = "InTreePluginvSphereUnregister"
 
-	// owner: @danwinship
-	// kep: https://kep.k8s.io/3178
-	// alpha: v1.25
-	// beta: v1.27
-	// stable: v1.28
-	//
-	// Causes kubelet to no longer create legacy IPTables rules
-	IPTablesOwnershipCleanup featuregate.Feature = "IPTablesOwnershipCleanup"
-
 	// owner: @mimowo
 	// kep: https://kep.k8s.io/3850
 	// alpha: v1.28
+	// beta: v1.29
 	//
 	// Allows users to specify counting of failed pods per index.
 	JobBackoffLimitPerIndex featuregate.Feature = "JobBackoffLimitPerIndex"
 
-	// owner: @ahg
-	// beta: v1.23
-	// stable: v1.27
+	// owner: @mimowo
+	// kep: https://kep.k8s.io/4368
+	// alpha: v1.30
 	//
-	// Allow updating node scheduling directives in the pod template of jobs. Specifically,
-	// node affinity, selector and tolerations. This is allowed only for suspended jobs
-	// that have never been unsuspended before.
-	JobMutableNodeSchedulingDirectives featuregate.Feature = "JobMutableNodeSchedulingDirectives"
+	// Allows to delegate reconciliation of a Job object to an external controller.
+	JobManagedBy featuregate.Feature = "JobManagedBy"
 
 	// owner: @mimowo
 	// kep: https://kep.k8s.io/3329
@@ -420,27 +336,19 @@ const (
 	// owner: @kannon92
 	// kep : https://kep.k8s.io/3939
 	// alpha: v1.28
+	// beta: v1.29
 	//
 	// Allow users to specify recreating pods of a job only when
 	// pods have fully terminated.
 	JobPodReplacementPolicy featuregate.Feature = "JobPodReplacementPolicy"
-	// owner: @alculquicondor
-	// alpha: v1.23
-	// beta: v1.24
-	//
-	// Track the number of pods with Ready condition in the Job status.
-	JobReadyPods featuregate.Feature = "JobReadyPods"
 
-	// owner: @alculquicondor
-	// alpha: v1.22
-	// beta: v1.23
-	// stable: v1.26
+	// owner: @tenzen-y
+	// kep: https://kep.k8s.io/3998
+	// alpha: v1.30
 	//
-	// Track Job completion without relying on Pod remaining in the cluster
-	// indefinitely. Pod finalizers, in addition to a field in the Job status
-	// allow the Job controller to keep track of Pods that it didn't account for
-	// yet.
-	JobTrackingWithFinalizers featuregate.Feature = "JobTrackingWithFinalizers"
+	// Allow users to specify when a Job can be declared as succeeded
+	// based on the set of succeeded pods.
+	JobSuccessPolicy featuregate.Feature = "JobSuccessPolicy"
 
 	// owner: @marquiz
 	// kep: http://kep.k8s.io/4033
@@ -461,14 +369,6 @@ const (
 	// All the node components such as CRI need to be running in the same user namespace.
 	KubeletInUserNamespace featuregate.Feature = "KubeletInUserNamespace"
 
-	// owner: @dashpole, @ffromani (only for GA graduation)
-	// alpha: v1.13
-	// beta: v1.15
-	// GA: v1.28
-	//
-	// Enables the kubelet's pod resources grpc endpoint
-	KubeletPodResources featuregate.Feature = "KubeletPodResources"
-
 	// owner: @moshe010
 	// alpha: v1.27
 	//
@@ -481,12 +381,11 @@ const (
 	// Enable POD resources API with Get method
 	KubeletPodResourcesGet featuregate.Feature = "KubeletPodResourcesGet"
 
-	// owner: @ffromani
-	// alpha: v1.21
-	// beta: v1.23
-	// GA: v1.28
-	// Enable POD resources API to return allocatable resources
-	KubeletPodResourcesGetAllocatable featuregate.Feature = "KubeletPodResourcesGetAllocatable"
+	// KubeletSeparateDiskGC enables Kubelet to garbage collection images/containers on different filesystems
+	// owner: @kannon92
+	// kep: https://kep.k8s.io/4191
+	// alpha: v1.29
+	KubeletSeparateDiskGC featuregate.Feature = "KubeletSeparateDiskGC"
 
 	// owner: @sallyom
 	// kep: https://kep.k8s.io/2832
@@ -499,30 +398,18 @@ const (
 	// owner: @alexanderConstantinescu
 	// kep: http://kep.k8s.io/3836
 	// alpha: v1.28
+	// beta: v1.30
+	// stable: v1.31
 	//
 	// Implement connection draining for terminating nodes for
 	// `externalTrafficPolicy: Cluster` services.
 	KubeProxyDrainingTerminatingNodes featuregate.Feature = "KubeProxyDrainingTerminatingNodes"
 
-	// owner: @zshihang
-	// kep: https://kep.k8s.io/2800
-	// beta: v1.24
-	// ga: v1.26
-	//
-	// Stop auto-generation of secret-based service account tokens.
-	LegacyServiceAccountTokenNoAutoGeneration featuregate.Feature = "LegacyServiceAccountTokenNoAutoGeneration"
-
-	// owner: @zshihang
-	// kep: http://kep.k8s.io/2800
-	// alpha: v1.26
-	// beta: v1.27
-	//
-	// Enables tracking of secret-based service account tokens usage.
-	LegacyServiceAccountTokenTracking featuregate.Feature = "LegacyServiceAccountTokenTracking"
-
 	// owner: @yt2985
-	// kep: http://kep.k8s.io/2800
+	// kep: http://kep.k8s.io/2799
 	// alpha: v1.28
+	// beta: v1.29
+	// GA: v1.30
 	//
 	// Enables cleaning up of secret-based service account tokens.
 	LegacyServiceAccountTokenCleanUp featuregate.Feature = "LegacyServiceAccountTokenCleanUp"
@@ -537,9 +424,18 @@ const (
 	// owner: @damemi
 	// alpha: v1.21
 	// beta: v1.22
+	// GA: v1.31
 	//
 	// Enables scaling down replicas via logarithmic comparison of creation/ready timestamps
 	LogarithmicScaleDown featuregate.Feature = "LogarithmicScaleDown"
+
+	// owner: @sanposhiho
+	// kep: https://kep.k8s.io/3633
+	// alpha: v1.29
+	// beta: v1.30
+	//
+	// Enables the MatchLabelKeys and MismatchLabelKeys in PodAffinity and PodAntiAffinity.
+	MatchLabelKeysInPodAffinity featuregate.Feature = "MatchLabelKeysInPodAffinity"
 
 	// owner: @denkensk
 	// kep: https://kep.k8s.io/3243
@@ -572,24 +468,10 @@ const (
 	// kep: https://kep.k8s.io/3022
 	// alpha: v1.24
 	// beta: v1.25
+	// GA: v1.30
 	//
 	// Enable MinDomains in Pod Topology Spread.
 	MinDomainsInPodTopologySpread featuregate.Feature = "MinDomainsInPodTopologySpread"
-
-	// owner: @danwinship
-	// kep: http://kep.k8s.io/3453
-	// alpha: v1.26
-	// beta: v1.27
-	//
-	// Enables new performance-improving code in kube-proxy iptables mode
-	MinimizeIPTablesRestore featuregate.Feature = "MinimizeIPTablesRestore"
-
-	// owner: @sarveshr7
-	// kep: https://kep.k8s.io/2593
-	// alpha: v1.25
-	//
-	// Enables the MultiCIDR Range allocator.
-	MultiCIDRRangeAllocator featuregate.Feature = "MultiCIDRRangeAllocator"
 
 	// owner: @aojea
 	// kep: https://kep.k8s.io/1880
@@ -602,12 +484,22 @@ const (
 	// kep: https://kep.k8s.io/3756
 	// alpha: v1.25 (as part of SELinuxMountReadWriteOncePod)
 	// beta: v1.27
+	// GA: v1.30
 	// Robust VolumeManager reconstruction after kubelet restart.
 	NewVolumeManagerReconstruction featuregate.Feature = "NewVolumeManagerReconstruction"
+
+	// owner: @danwinship
+	// kep: https://kep.k8s.io/3866
+	// alpha: v1.29
+	// beta: v1.31
+	//
+	// Allows running kube-proxy with `--mode nftables`.
+	NFTablesProxyMode featuregate.Feature = "NFTablesProxyMode"
 
 	// owner: @aravindhp @LorbusChris
 	// kep: http://kep.k8s.io/2271
 	// alpha: v1.27
+	// beta: v1.30
 	//
 	// Enables querying logs of node services using the /logs endpoint
 	NodeLogQuery featuregate.Feature = "NodeLogQuery"
@@ -621,17 +513,20 @@ const (
 	// Allow pods to failover to a different node in case of non graceful node shutdown
 	NodeOutOfServiceVolumeDetach featuregate.Feature = "NodeOutOfServiceVolumeDetach"
 
-	// owner: @iholder101
+	// owner: @iholder101 @kannon92
+	// kep: https://kep.k8s.io/2400
 	// alpha: v1.22
-	// beta1: v1.28. For more info, please look at the KEP: https://kep.k8s.io/2400.
-	//
-	// Permits kubelet to run with swap enabled
+	// beta1: v1.28 (default=false)
+	// beta2: v.1.30 (default=true)
+
+	// Permits kubelet to run with swap enabled.
 	NodeSwap featuregate.Feature = "NodeSwap"
 
 	// owner: @mortent, @atiratree, @ravig
 	// kep: http://kep.k8s.io/3018
 	// alpha: v1.26
 	// beta: v1.27
+	// GA: v1.31
 	//
 	// Enables PDBUnhealthyPodEvictionPolicy for PodDisruptionBudgets
 	PDBUnhealthyPodEvictionPolicy featuregate.Feature = "PDBUnhealthyPodEvictionPolicy"
@@ -639,6 +534,7 @@ const (
 	// owner: @RomanBednar
 	// kep: https://kep.k8s.io/3762
 	// alpha: v1.28
+	// beta: v1.29
 	//
 	// Adds a new field to persistent volumes which holds a timestamp of when the volume last transitioned its phase.
 	PersistentVolumeLastPhaseTransitionTime featuregate.Feature = "PersistentVolumeLastPhaseTransitionTime"
@@ -685,40 +581,42 @@ const (
 	// owner: @wzshiming
 	// kep: http://kep.k8s.io/2681
 	// alpha: v1.28
+	// beta: v1.29
+	// GA: v1.30
 	//
 	// Adds pod.status.hostIPs and downward API
 	PodHostIPs featuregate.Feature = "PodHostIPs"
+
+	// owner: @AxeZhan
+	// kep: http://kep.k8s.io/3960
+	// alpha: v1.29
+	// beta: v1.30
+	//
+	// Enables SleepAction in container lifecycle hooks
+	PodLifecycleSleepAction featuregate.Feature = "PodLifecycleSleepAction"
 
 	// owner: @Huang-Wei
 	// kep: https://kep.k8s.io/3521
 	// alpha: v1.26
 	// beta: v1.27
+	// stable: v1.30
 	//
 	// Enable users to specify when a Pod is ready for scheduling.
 	PodSchedulingReadiness featuregate.Feature = "PodSchedulingReadiness"
 
-	// owner: @rphillips
-	// alpha: v1.21
-	// beta: v1.22
-	// ga: v1.28
+	// owner: @seans3
+	// kep: http://kep.k8s.io/4006
+	// alpha: v1.30
+	// beta: v1.31
 	//
-	// Allows user to override pod-level terminationGracePeriod for probes
-	ProbeTerminationGracePeriod featuregate.Feature = "ProbeTerminationGracePeriod"
+	// Enables PortForward to be proxied with a websocket client
+	PortForwardWebsockets featuregate.Feature = "PortForwardWebsockets"
 
 	// owner: @jessfraz
 	// alpha: v1.12
 	//
 	// Enables control over ProcMountType for containers.
 	ProcMountType featuregate.Feature = "ProcMountType"
-
-	// owner: @andrewsykim
-	// kep: https://kep.k8s.io/1669
-	// alpha: v1.22
-	// beta: v1.26
-	// GA: v1.28
-	//
-	// Enable kube-proxy to handle terminating ednpoints when externalTrafficPolicy=Local
-	ProxyTerminatingEndpoints featuregate.Feature = "ProxyTerminatingEndpoints"
 
 	// owner: @sjenning
 	// alpha: v1.11
@@ -727,14 +625,6 @@ const (
 	// bursting into resources requested at higher QoS levels (memory only for now)
 	QOSReserved featuregate.Feature = "QOSReserved"
 
-	// owner: @chrishenzie
-	// kep: https://kep.k8s.io/2485
-	// alpha: v1.22
-	// beta: v1.27
-	//
-	// Enables usage of the ReadWriteOncePod PersistentVolume access mode.
-	ReadWriteOncePod featuregate.Feature = "ReadWriteOncePod"
-
 	// owner: @gnufied
 	// kep: https://kep.k8s.io/1790
 	// alpha: v1.23
@@ -742,14 +632,20 @@ const (
 	// Allow users to recover from volume expansion failure
 	RecoverVolumeExpansionFailure featuregate.Feature = "RecoverVolumeExpansionFailure"
 
-	// owner: @RomanBednar
-	// kep: https://kep.k8s.io/3333
-	// alpha: v1.25
-	// beta: 1.26
-	// stable: v1.28
+	// owner: @HirazawaUi
+	// kep: https://kep.k8s.io/4369
+	// alpha: v1.30
 	//
-	// Allow assigning StorageClass to unbound PVCs retroactively
-	RetroactiveDefaultStorageClass featuregate.Feature = "RetroactiveDefaultStorageClass"
+	// Allow almost all printable ASCII characters in environment variables
+	RelaxedEnvironmentVariableValidation featuregate.Feature = "RelaxedEnvironmentVariableValidation"
+
+	// owner: @zhangweikop
+	// beta: v1.31
+	//
+	// Enable kubelet tls server to update certificate if the specified certificate files are changed.
+	// This feature is useful when specifying tlsCertFile & tlsPrivateKeyFile in kubelet Configuration.
+	// No effect for other cases such as using serverTLSbootstap.
+	ReloadKubeletServerCertificateFile featuregate.Feature = "ReloadKubeletServerCertificateFile"
 
 	// owner: @mikedanese
 	// alpha: v1.7
@@ -759,6 +655,13 @@ const (
 	// Request API instead of generating one self signed and auto rotates the
 	// certificate as expiration approaches.
 	RotateKubeletServerCertificate featuregate.Feature = "RotateKubeletServerCertificate"
+
+	// owner: @kiashok
+	// kep: https://kep.k8s.io/4216
+	// alpha: v1.29
+	//
+	// Adds support to pull images based on the runtime class specified.
+	RuntimeClassInImageCriAPI featuregate.Feature = "RuntimeClassInImageCriApi"
 
 	// owner: @danielvegamyhre
 	// kep: https://kep.k8s.io/2413
@@ -777,35 +680,58 @@ const (
 	// which benefits to reduce the useless requeueing.
 	SchedulerQueueingHints featuregate.Feature = "SchedulerQueueingHints"
 
-	// owner: @saschagrunert
-	// kep: https://kep.k8s.io/2413
-	// alpha: v1.22
-	// beta: v1.25
-	// ga: v1.27
+	// owner: @atosatto @yuanchen8911
+	// kep: http://kep.k8s.io/3902
+	// beta: v1.29
 	//
-	// Enables the use of `RuntimeDefault` as the default seccomp profile for all workloads.
-	SeccompDefault featuregate.Feature = "SeccompDefault"
+	// Decouples Taint Eviction Controller, performing taint-based Pod eviction, from Node Lifecycle Controller.
+	SeparateTaintEvictionController featuregate.Feature = "SeparateTaintEvictionController"
 
-	// owner: @mtardy
-	// alpha: v1.0
+	// owner: @munnerz
+	// kep: http://kep.k8s.io/4193
+	// alpha: v1.29
+	// beta: v1.30
 	//
-	// Putting this admission plugin behind a feature gate is part of the
-	// deprecation process. For details about the removal see:
-	// https://github.com/kubernetes/kubernetes/issues/111516
-	SecurityContextDeny featuregate.Feature = "SecurityContextDeny"
+	// Controls whether JTIs (UUIDs) are embedded into generated service account tokens, and whether these JTIs are
+	// recorded into the audit log for future requests made by these tokens.
+	ServiceAccountTokenJTI featuregate.Feature = "ServiceAccountTokenJTI"
 
-	// owner: @xuzhenglun
-	// kep: http://kep.k8s.io/3682
-	// alpha: v1.27
-	// beta: v1.28
-	// stable: v1.29
+	// owner: @munnerz
+	// kep: http://kep.k8s.io/4193
+	// alpha: v1.29
+	// beta: v1.31
 	//
-	// Subdivide the NodePort range for dynamic and static port allocation.
-	ServiceNodePortStaticSubrange featuregate.Feature = "ServiceNodePortStaticSubrange"
+	// Controls whether the apiserver supports binding service account tokens to Node objects.
+	ServiceAccountTokenNodeBinding featuregate.Feature = "ServiceAccountTokenNodeBinding"
+
+	// owner: @munnerz
+	// kep: http://kep.k8s.io/4193
+	// alpha: v1.29
+	// beta: v1.30
+	//
+	// Controls whether the apiserver will validate Node claims in service account tokens.
+	ServiceAccountTokenNodeBindingValidation featuregate.Feature = "ServiceAccountTokenNodeBindingValidation"
+
+	// owner: @munnerz
+	// kep: http://kep.k8s.io/4193
+	// alpha: v1.29
+	// beta: v1.30
+	//
+	// Controls whether the apiserver embeds the node name and uid for the associated node when issuing
+	// service account tokens bound to Pod objects.
+	ServiceAccountTokenPodNodeInfo featuregate.Feature = "ServiceAccountTokenPodNodeInfo"
+
+	// owner: @gauravkghildiyal @robscott
+	// kep: https://kep.k8s.io/4444
+	// alpha: v1.30
+	//
+	// Enables trafficDistribution field on Services.
+	ServiceTrafficDistribution featuregate.Feature = "ServiceTrafficDistribution"
 
 	// owner: @gjkim42 @SergeyKanzhelev @matthyx @tzneal
 	// kep: http://kep.k8s.io/753
 	// alpha: v1.28
+	// beta: v1.29
 	//
 	// Introduces sidecar containers, a new type of init container that starts
 	// before other containers but remains running for the full duration of the
@@ -822,6 +748,7 @@ const (
 	// owner: @alexanderConstantinescu
 	// kep: http://kep.k8s.io/3458
 	// beta: v1.27
+	// GA: v1.30
 	//
 	// Enables less load balancer re-configurations by the service controller
 	// (KCCM) as an effect of changing node state.
@@ -841,6 +768,13 @@ const (
 	// Enables a StatefulSet to start from an arbitrary non zero ordinal
 	StatefulSetStartOrdinal featuregate.Feature = "StatefulSetStartOrdinal"
 
+	// owner: @nilekhc
+	// kep: https://kep.k8s.io/4192
+	// alpha: v1.30
+
+	// Enables support for the StorageVersionMigrator controller.
+	StorageVersionMigrator featuregate.Feature = "StorageVersionMigrator"
+
 	// owner: @robscott
 	// kep: https://kep.k8s.io/2433
 	// alpha: v1.21
@@ -848,14 +782,6 @@ const (
 	//
 	// Enables topology aware hints for EndpointSlices
 	TopologyAwareHints featuregate.Feature = "TopologyAwareHints"
-
-	// owner: @lmdaly, @swatisehgal (for GA graduation)
-	// alpha: v1.16
-	// beta: v1.18
-	// GA: v1.27
-	//
-	// Enable resource managers to make NUMA aligned decisions
-	TopologyManager featuregate.Feature = "TopologyManager"
 
 	// owner: @PiotrProkop
 	// kep: https://kep.k8s.io/3545
@@ -885,6 +811,15 @@ const (
 	// Allow the usage of options to fine-tune the topology manager policies.
 	TopologyManagerPolicyOptions featuregate.Feature = "TopologyManagerPolicyOptions"
 
+	// owner: @seans3
+	// kep: http://kep.k8s.io/4006
+	// alpha: v1.29
+	// beta: v1.30
+	//
+	// Enables StreamTranslator proxy to handle WebSockets upgrade requests for the
+	// version of the RemoteCommand subprotocol that supports the "close" signal.
+	TranslateStreamCloseWebsocketRequests featuregate.Feature = "TranslateStreamCloseWebsocketRequests"
+
 	// owner: @richabanker
 	// alpha: v1.28
 	//
@@ -894,9 +829,17 @@ const (
 	// owner: @rata, @giuseppe
 	// kep: https://kep.k8s.io/127
 	// alpha: v1.25
+	// beta: v1.30
 	//
 	// Enables user namespace support for stateless pods.
 	UserNamespacesSupport featuregate.Feature = "UserNamespacesSupport"
+
+	// owner: @mattcarry, @sunnylovestiramisu
+	// kep: https://kep.k8s.io/3751
+	// alpha: v1.29
+	//
+	// Enables user specified volume attributes for persistent volumes, like iops and throughput.
+	VolumeAttributesClass featuregate.Feature = "VolumeAttributesClass"
 
 	// owner: @cofyc
 	// alpha: v1.21
@@ -947,15 +890,74 @@ const (
 	// Enables In-Place Pod Vertical Scaling
 	InPlacePodVerticalScaling featuregate.Feature = "InPlacePodVerticalScaling"
 
-	// owner: @Sh4d1,@RyanAoh
+	// owner: @Sh4d1,@RyanAoh,@rikatz
 	// kep: http://kep.k8s.io/1860
 	// alpha: v1.29
+	// beta: v1.30
 	// LoadBalancerIPMode enables the IPMode field in the LoadBalancerIngress status of a Service
 	LoadBalancerIPMode featuregate.Feature = "LoadBalancerIPMode"
+
+	// owner: @haircommander
+	// kep: http://kep.k8s.io/4210
+	// alpha: v1.29
+	// beta: v1.30
+	// ImageMaximumGCAge enables the Kubelet configuration field of the same name, allowing an admin
+	// to specify the age after which an image will be garbage collected.
+	ImageMaximumGCAge featuregate.Feature = "ImageMaximumGCAge"
+
+	// owner: @saschagrunert
+	// alpha: v1.28
+	//
+	// Enables user namespace support for Pod Security Standards. Enabling this
+	// feature will modify all Pod Security Standard rules to allow setting:
+	// spec[.*].securityContext.[runAsNonRoot,runAsUser]
+	// This feature gate should only be enabled if all nodes in the cluster
+	// support the user namespace feature and have it enabled. The feature gate
+	// will not graduate or be enabled by default in future Kubernetes
+	// releases.
+	UserNamespacesPodSecurityStandards featuregate.Feature = "UserNamespacesPodSecurityStandards"
+
+	// owner: @ahutsunshine
+	// beta: v1.30
+	//
+	// Allows namespace indexer for namespace scope resources in apiserver cache to accelerate list operations.
+	StorageNamespaceIndex featuregate.Feature = "StorageNamespaceIndex"
+
+	// owner: @jsafrane
+	// kep: https://kep.k8s.io/1710
+	// alpha: v1.30
+	// Speed up container startup by mounting volumes with the correct SELinux label
+	// instead of changing each file on the volumes recursively.
+	SELinuxMount featuregate.Feature = "SELinuxMount"
+
+	// owner: @AkihiroSuda
+	// kep: https://kep.k8s.io/3857
+	// alpha: v1.30
+	// beta: v1.31
+	//
+	// Allows recursive read-only mounts.
+	RecursiveReadOnlyMounts featuregate.Feature = "RecursiveReadOnlyMounts"
+
+	// owner: @everpeace
+	// kep: https://kep.k8s.io/3619
+	// alpha: v1.31
+	//
+	// Enable SupplementalGroupsPolicy feature in PodSecurityContext
+	SupplementalGroupsPolicy featuregate.Feature = "SupplementalGroupsPolicy"
 )
 
 func init() {
 	runtime.Must(utilfeature.DefaultMutableFeatureGate.Add(defaultKubernetesFeatureGates))
+	runtime.Must(utilfeature.DefaultMutableFeatureGate.AddVersioned(defaultVersionedKubernetesFeatureGates))
+
+	// Register all client-go features with kube's feature gate instance and make all client-go
+	// feature checks use kube's instance. The effect is that for kube binaries, client-go
+	// features are wired to the existing --feature-gates flag just as all other features
+	// are. Further, client-go features automatically support the existing mechanisms for
+	// feature enablement metrics and test overrides.
+	ca := &clientAdapter{utilfeature.DefaultMutableFeatureGate}
+	runtime.Must(clientfeatures.AddFeaturesToExistingFeatureGates(ca))
+	clientfeatures.ReplaceFeatureGates(ca)
 }
 
 // defaultKubernetesFeatureGates consists of all known Kubernetes-specific feature keys.
@@ -971,13 +973,15 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	AnyVolumeDataSource: {Default: true, PreRelease: featuregate.Beta}, // on by default in 1.24
 
-	APISelfSubjectReview: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.28; remove in 1.30
-
 	AppArmor: {Default: true, PreRelease: featuregate.Beta},
 
-	CloudDualStackNodeIPs: {Default: true, PreRelease: featuregate.Beta},
+	AppArmorFields: {Default: true, PreRelease: featuregate.Beta},
+
+	CloudDualStackNodeIPs: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
 
 	ClusterTrustBundle: {Default: false, PreRelease: featuregate.Alpha},
+
+	ClusterTrustBundleProjection: {Default: false, PreRelease: featuregate.Alpha},
 
 	CPUCFSQuotaPeriod: {Default: false, PreRelease: featuregate.Alpha},
 
@@ -989,59 +993,41 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	CPUManagerPolicyOptions: {Default: true, PreRelease: featuregate.Beta},
 
-	CSIMigrationAzureFile: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.28
-
-	CSIMigrationPortworx: {Default: false, PreRelease: featuregate.Beta}, // Off by default (requires Portworx CSI driver)
-
-	CSIMigrationRBD: {Default: false, PreRelease: featuregate.Deprecated}, //  deprecated in 1.28, remove in 1.31
-
-	CSIMigrationvSphere: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
-
-	CSINodeExpandSecret: {Default: true, PreRelease: featuregate.Beta},
+	CSIMigrationPortworx: {Default: true, PreRelease: featuregate.Beta}, // On by default (requires Portworx CSI driver)
 
 	CSIVolumeHealth: {Default: false, PreRelease: featuregate.Alpha},
 
-	SkipReadOnlyValidationGCE: {Default: false, PreRelease: featuregate.Alpha},
-
 	CloudControllerManagerWebhook: {Default: false, PreRelease: featuregate.Alpha},
 
-	ContainerCheckpoint: {Default: false, PreRelease: featuregate.Alpha},
-
-	ConsistentHTTPGetHandlers: {Default: true, PreRelease: featuregate.GA},
+	ContainerCheckpoint: {Default: true, PreRelease: featuregate.Beta},
 
 	CronJobsScheduledAnnotation: {Default: true, PreRelease: featuregate.Beta},
 
-	CronJobTimeZone: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+	DisableCloudProviders: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 
-	DefaultHostNetworkHostPortsInPodTemplates: {Default: false, PreRelease: featuregate.Deprecated},
+	DisableKubeletCloudCredentialProviders: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 
-	DisableCloudProviders: {Default: true, PreRelease: featuregate.Beta},
+	DisableNodeKubeProxyVersion: {Default: true, PreRelease: featuregate.Beta},
 
-	DisableKubeletCloudCredentialProviders: {Default: true, PreRelease: featuregate.Beta},
-
-	DevicePluginCDIDevices: {Default: false, PreRelease: featuregate.Alpha},
-
-	DownwardAPIHugePages: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in v1.29
+	DevicePluginCDIDevices: {Default: true, PreRelease: featuregate.GA},
 
 	DynamicResourceAllocation: {Default: false, PreRelease: featuregate.Alpha},
 
-	EventedPLEG: {Default: false, PreRelease: featuregate.Beta}, // off by default, requires CRI Runtime support
+	EventedPLEG: {Default: false, PreRelease: featuregate.Alpha},
 
 	ExecProbeTimeout: {Default: true, PreRelease: featuregate.GA}, // lock to default and remove after v1.22 based on KEP #1972 update
 
-	ExpandedDNSConfig: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.30
-
-	ExperimentalHostUserNamespaceDefaultingGate: {Default: false, PreRelease: featuregate.Deprecated, LockToDefault: true}, // remove in 1.30
-
-	GRPCContainerProbe: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, //remove in 1.29
+	RetryGenerateName: {Default: true, PreRelease: featuregate.Beta},
 
 	GracefulNodeShutdown: {Default: true, PreRelease: featuregate.Beta},
 
 	GracefulNodeShutdownBasedOnPodPriority: {Default: true, PreRelease: featuregate.Beta},
 
-	HPAContainerMetrics: {Default: true, PreRelease: featuregate.Beta},
+	HPAContainerMetrics: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
 
-	HonorPVReclaimPolicy: {Default: false, PreRelease: featuregate.Alpha},
+	HonorPVReclaimPolicy: {Default: true, PreRelease: featuregate.Beta},
+
+	ImageMaximumGCAge: {Default: true, PreRelease: featuregate.Beta},
 
 	InTreePluginAWSUnregister: {Default: false, PreRelease: featuregate.Alpha},
 
@@ -1055,49 +1041,39 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	InTreePluginPortworxUnregister: {Default: false, PreRelease: featuregate.Alpha},
 
-	InTreePluginRBDUnregister: {Default: false, PreRelease: featuregate.Deprecated}, // deprecated in 1.28, remove in 1.31
-
 	InTreePluginvSphereUnregister: {Default: false, PreRelease: featuregate.Alpha},
 
-	IPTablesOwnershipCleanup: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.30
+	JobBackoffLimitPerIndex: {Default: true, PreRelease: featuregate.Beta},
 
-	JobBackoffLimitPerIndex: {Default: false, PreRelease: featuregate.Alpha},
-
-	JobMutableNodeSchedulingDirectives: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+	JobManagedBy: {Default: false, PreRelease: featuregate.Alpha},
 
 	JobPodFailurePolicy: {Default: true, PreRelease: featuregate.Beta},
 
-	JobPodReplacementPolicy: {Default: false, PreRelease: featuregate.Alpha},
+	JobPodReplacementPolicy: {Default: true, PreRelease: featuregate.Beta},
 
-	JobReadyPods: {Default: true, PreRelease: featuregate.Beta},
-
-	JobTrackingWithFinalizers: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.28
+	JobSuccessPolicy: {Default: false, PreRelease: featuregate.Alpha},
 
 	KubeletCgroupDriverFromCRI: {Default: false, PreRelease: featuregate.Alpha},
 
 	KubeletInUserNamespace: {Default: false, PreRelease: featuregate.Alpha},
 
-	KubeletPodResources: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.28, remove in 1.30
-
 	KubeletPodResourcesDynamicResources: {Default: false, PreRelease: featuregate.Alpha},
 
 	KubeletPodResourcesGet: {Default: false, PreRelease: featuregate.Alpha},
 
-	KubeletPodResourcesGetAllocatable: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.28, remove in 1.30
+	KubeletSeparateDiskGC: {Default: false, PreRelease: featuregate.Alpha},
 
 	KubeletTracing: {Default: true, PreRelease: featuregate.Beta},
 
-	KubeProxyDrainingTerminatingNodes: {Default: false, PreRelease: featuregate.Alpha},
+	KubeProxyDrainingTerminatingNodes: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.31; remove in 1.33
 
-	LegacyServiceAccountTokenNoAutoGeneration: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
-
-	LegacyServiceAccountTokenTracking: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.30
-
-	LegacyServiceAccountTokenCleanUp: {Default: false, PreRelease: featuregate.Alpha},
+	LegacyServiceAccountTokenCleanUp: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.30; remove in 1.32
 
 	LocalStorageCapacityIsolationFSQuotaMonitoring: {Default: false, PreRelease: featuregate.Alpha},
 
-	LogarithmicScaleDown: {Default: true, PreRelease: featuregate.Beta},
+	LogarithmicScaleDown: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+
+	MatchLabelKeysInPodAffinity: {Default: true, PreRelease: featuregate.Beta},
 
 	MatchLabelKeysInPodTopologySpread: {Default: true, PreRelease: featuregate.Beta},
 
@@ -1107,25 +1083,23 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	MemoryQoS: {Default: false, PreRelease: featuregate.Alpha},
 
-	MinDomainsInPodTopologySpread: {Default: true, PreRelease: featuregate.Beta},
-
-	MinimizeIPTablesRestore: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.30
-
-	MultiCIDRRangeAllocator: {Default: false, PreRelease: featuregate.Alpha},
+	MinDomainsInPodTopologySpread: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
 
 	MultiCIDRServiceAllocator: {Default: false, PreRelease: featuregate.Alpha},
 
-	NewVolumeManagerReconstruction: {Default: true, PreRelease: featuregate.Beta},
+	NewVolumeManagerReconstruction: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
 
-	NodeLogQuery: {Default: false, PreRelease: featuregate.Alpha},
+	NFTablesProxyMode: {Default: true, PreRelease: featuregate.Beta},
+
+	NodeLogQuery: {Default: false, PreRelease: featuregate.Beta},
 
 	NodeOutOfServiceVolumeDetach: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.31
 
-	NodeSwap: {Default: false, PreRelease: featuregate.Beta},
+	NodeSwap: {Default: true, PreRelease: featuregate.Beta},
 
-	PDBUnhealthyPodEvictionPolicy: {Default: true, PreRelease: featuregate.Beta},
+	PDBUnhealthyPodEvictionPolicy: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.33
 
-	PersistentVolumeLastPhaseTransitionTime: {Default: false, PreRelease: featuregate.Alpha},
+	PersistentVolumeLastPhaseTransitionTime: {Default: true, PreRelease: featuregate.Beta},
 
 	PodAndContainerStatsFromCRI: {Default: false, PreRelease: featuregate.Alpha},
 
@@ -1135,49 +1109,57 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	PodReadyToStartContainersCondition: {Default: true, PreRelease: featuregate.Beta},
 
-	PodHostIPs: {Default: false, PreRelease: featuregate.Alpha},
+	PodHostIPs: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
 
-	PodSchedulingReadiness: {Default: true, PreRelease: featuregate.Beta},
+	PodLifecycleSleepAction: {Default: true, PreRelease: featuregate.Beta},
 
-	ProbeTerminationGracePeriod: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+	PodSchedulingReadiness: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.30; remove in 1.32
+
+	PortForwardWebsockets: {Default: true, PreRelease: featuregate.Beta},
 
 	ProcMountType: {Default: false, PreRelease: featuregate.Alpha},
 
-	ProxyTerminatingEndpoints: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.30
-
 	QOSReserved: {Default: false, PreRelease: featuregate.Alpha},
-
-	ReadWriteOncePod: {Default: true, PreRelease: featuregate.Beta},
 
 	RecoverVolumeExpansionFailure: {Default: false, PreRelease: featuregate.Alpha},
 
-	RetroactiveDefaultStorageClass: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+	RelaxedEnvironmentVariableValidation: {Default: false, PreRelease: featuregate.Alpha},
+
+	ReloadKubeletServerCertificateFile: {Default: true, PreRelease: featuregate.Beta},
 
 	RotateKubeletServerCertificate: {Default: true, PreRelease: featuregate.Beta},
 
+	RuntimeClassInImageCriAPI: {Default: false, PreRelease: featuregate.Alpha},
+
 	ElasticIndexedJob: {Default: true, PreRelease: featuregate.Beta},
 
-	SchedulerQueueingHints: {Default: true, PreRelease: featuregate.Beta},
+	SchedulerQueueingHints: {Default: false, PreRelease: featuregate.Beta},
 
-	SeccompDefault: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+	SeparateTaintEvictionController: {Default: true, PreRelease: featuregate.Beta},
 
-	SecurityContextDeny: {Default: false, PreRelease: featuregate.Alpha},
+	ServiceAccountTokenJTI: {Default: true, PreRelease: featuregate.Beta},
 
-	ServiceNodePortStaticSubrange: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.29; remove in 1.31
+	ServiceAccountTokenPodNodeInfo: {Default: true, PreRelease: featuregate.Beta},
 
-	SidecarContainers: {Default: false, PreRelease: featuregate.Alpha},
+	ServiceAccountTokenNodeBinding: {Default: true, PreRelease: featuregate.Beta},
+
+	ServiceAccountTokenNodeBindingValidation: {Default: true, PreRelease: featuregate.Beta},
+
+	ServiceTrafficDistribution: {Default: false, PreRelease: featuregate.Alpha},
+
+	SidecarContainers: {Default: true, PreRelease: featuregate.Beta},
 
 	SizeMemoryBackedVolumes: {Default: true, PreRelease: featuregate.Beta},
 
-	StableLoadBalancerNodeSet: {Default: true, PreRelease: featuregate.Beta},
+	StableLoadBalancerNodeSet: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.30, remove in 1.31
 
 	StatefulSetAutoDeletePVC: {Default: true, PreRelease: featuregate.Beta},
 
 	StatefulSetStartOrdinal: {Default: true, PreRelease: featuregate.Beta},
 
-	TopologyAwareHints: {Default: true, PreRelease: featuregate.Beta},
+	StorageVersionMigrator: {Default: false, PreRelease: featuregate.Alpha},
 
-	TopologyManager: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA in 1.27; remove in 1.29
+	TopologyAwareHints: {Default: true, PreRelease: featuregate.Beta},
 
 	TopologyManagerPolicyAlphaOptions: {Default: false, PreRelease: featuregate.Alpha},
 
@@ -1185,11 +1167,15 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	TopologyManagerPolicyOptions: {Default: true, PreRelease: featuregate.Beta},
 
+	TranslateStreamCloseWebsocketRequests: {Default: true, PreRelease: featuregate.Beta},
+
 	UnknownVersionInteroperabilityProxy: {Default: false, PreRelease: featuregate.Alpha},
+
+	VolumeAttributesClass: {Default: false, PreRelease: featuregate.Alpha},
 
 	VolumeCapacityPriority: {Default: false, PreRelease: featuregate.Alpha},
 
-	UserNamespacesSupport: {Default: false, PreRelease: featuregate.Alpha},
+	UserNamespacesSupport: {Default: false, PreRelease: featuregate.Beta},
 
 	WinDSR: {Default: false, PreRelease: featuregate.Alpha},
 
@@ -1205,39 +1191,95 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	PodIndexLabel: {Default: true, PreRelease: featuregate.Beta},
 
-	LoadBalancerIPMode: {Default: false, PreRelease: featuregate.Alpha},
+	LoadBalancerIPMode: {Default: true, PreRelease: featuregate.Beta},
+
+	UserNamespacesPodSecurityStandards: {Default: false, PreRelease: featuregate.Alpha},
+
+	SELinuxMount: {Default: false, PreRelease: featuregate.Alpha},
+
+	SupplementalGroupsPolicy: {Default: false, PreRelease: featuregate.Alpha},
 
 	// inherited features from generic apiserver, relisted here to get a conflict if it is changed
 	// unintentionally on either side:
 
-	genericfeatures.AdmissionWebhookMatchConditions: {Default: true, PreRelease: featuregate.Beta},
+	genericfeatures.AdmissionWebhookMatchConditions: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.33
 
-	genericfeatures.AggregatedDiscoveryEndpoint: {Default: true, PreRelease: featuregate.Beta},
+	genericfeatures.AggregatedDiscoveryEndpoint: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.33
 
 	genericfeatures.APIListChunking: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
 
-	genericfeatures.APIPriorityAndFairness: {Default: true, PreRelease: featuregate.Beta},
+	genericfeatures.APIPriorityAndFairness: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.31
 
 	genericfeatures.APIResponseCompression: {Default: true, PreRelease: featuregate.Beta},
 
-	genericfeatures.ValidatingAdmissionPolicy: {Default: false, PreRelease: featuregate.Beta},
+	genericfeatures.APIServerIdentity: {Default: true, PreRelease: featuregate.Beta},
 
-	genericfeatures.CustomResourceValidationExpressions: {Default: true, PreRelease: featuregate.Beta},
+	genericfeatures.APIServerTracing: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.APIServingWithRoutine: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.ConsistentListFromCache: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.CustomResourceValidationExpressions: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.31
+
+	genericfeatures.EfficientWatchResumption: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+
+	genericfeatures.KMSv1: {Default: false, PreRelease: featuregate.Deprecated},
+
+	genericfeatures.KMSv2: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.31
+
+	genericfeatures.KMSv2KDF: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.31
+
+	genericfeatures.MutatingAdmissionPolicy: {Default: false, PreRelease: featuregate.Alpha},
 
 	genericfeatures.OpenAPIEnums: {Default: true, PreRelease: featuregate.Beta},
 
-	genericfeatures.OpenAPIV3: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
+	genericfeatures.RemainingItemCount: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+
+	genericfeatures.ResilientWatchCacheInitialization: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.SeparateCacheWatchRPC: {Default: true, PreRelease: featuregate.Beta},
 
 	genericfeatures.ServerSideApply: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
 
 	genericfeatures.ServerSideFieldValidation: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
 
+	genericfeatures.StorageVersionAPI: {Default: false, PreRelease: featuregate.Alpha},
+
+	genericfeatures.StorageVersionHash: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.StrictCostEnforcementForVAP: {Default: false, PreRelease: featuregate.Beta},
+
+	genericfeatures.StrictCostEnforcementForWebhooks: {Default: false, PreRelease: featuregate.Beta},
+
+	genericfeatures.StructuredAuthenticationConfiguration: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.StructuredAuthorizationConfiguration: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.UnauthenticatedHTTP2DOSMitigation: {Default: true, PreRelease: featuregate.Beta},
+
+	genericfeatures.ValidatingAdmissionPolicy: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
+
+	genericfeatures.WatchBookmark: {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+
+	genericfeatures.WatchFromStorageWithoutResourceVersion: {Default: false, PreRelease: featuregate.Beta},
+
+	genericfeatures.WatchList: {Default: false, PreRelease: featuregate.Alpha},
+
+	genericfeatures.ZeroLimitedNominalConcurrencyShares: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.32
+
 	// inherited features from apiextensions-apiserver, relisted here to get a conflict if it is changed
 	// unintentionally on either side:
 
-	apiextensionsfeatures.CRDValidationRatcheting: {Default: false, PreRelease: featuregate.Alpha},
+	apiextensionsfeatures.CRDValidationRatcheting: {Default: true, PreRelease: featuregate.Beta},
+
+	apiextensionsfeatures.CustomResourceFieldSelectors: {Default: true, PreRelease: featuregate.Beta},
 
 	// features that enable backwards compatibility but are scheduled to be removed
 	// ...
 	HPAScaleToZero: {Default: false, PreRelease: featuregate.Alpha},
+
+	StorageNamespaceIndex: {Default: true, PreRelease: featuregate.Beta},
+
+	RecursiveReadOnlyMounts: {Default: true, PreRelease: featuregate.Beta},
 }

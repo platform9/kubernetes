@@ -854,17 +854,17 @@
           "freshness": "Current",
           "resources": [
             {
-              "resource": "clustercidrs",
+              "resource": "ipaddresses",
               "responseKind": {
                 "group": "",
-                "kind": "ClusterCIDR",
+                "kind": "IPAddress",
                 "version": ""
               },
               "scope": "Cluster",
               "shortNames": [
-                "cc"
+                "ip"
               ],
-              "singularResource": "clustercidr",
+              "singularResource": "ipaddress",
               "verbs": [
                 "create",
                 "delete",
@@ -877,17 +877,29 @@
               ]
             },
             {
-              "resource": "ipaddresses",
+              "resource": "servicecidrs",
               "responseKind": {
                 "group": "",
-                "kind": "IPAddress",
+                "kind": "ServiceCIDR",
                 "version": ""
               },
               "scope": "Cluster",
-              "shortNames": [
-                "ip"
+              "singularResource": "servicecidr",
+              "subresources": [
+                {
+                  "responseKind": {
+                    "group": "",
+                    "kind": "ServiceCIDR",
+                    "version": ""
+                  },
+                  "subresource": "status",
+                  "verbs": [
+                    "get",
+                    "patch",
+                    "update"
+                  ]
+                }
               ],
-              "singularResource": "ipaddress",
               "verbs": [
                 "create",
                 "delete",
@@ -1179,6 +1191,35 @@
             }
           ],
           "version": "v1"
+        },
+        {
+          "freshness": "Current",
+          "resources": [
+            {
+              "resource": "volumeattributesclasses",
+              "responseKind": {
+                "group": "",
+                "kind": "VolumeAttributesClass",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "shortNames": [
+                "vac"
+              ],
+              "singularResource": "volumeattributesclass",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            }
+          ],
+          "version": "v1alpha1"
         }
       ]
     },
@@ -1203,6 +1244,67 @@
               },
               "scope": "Cluster",
               "singularResource": "mutatingwebhookconfiguration",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "categories": [
+                "api-extensions"
+              ],
+              "resource": "validatingadmissionpolicies",
+              "responseKind": {
+                "group": "",
+                "kind": "ValidatingAdmissionPolicy",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "validatingadmissionpolicy",
+              "subresources": [
+                {
+                  "responseKind": {
+                    "group": "",
+                    "kind": "ValidatingAdmissionPolicy",
+                    "version": ""
+                  },
+                  "subresource": "status",
+                  "verbs": [
+                    "get",
+                    "patch",
+                    "update"
+                  ]
+                }
+              ],
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "categories": [
+                "api-extensions"
+              ],
+              "resource": "validatingadmissionpolicybindings",
+              "responseKind": {
+                "group": "",
+                "kind": "ValidatingAdmissionPolicyBinding",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "validatingadmissionpolicybinding",
               "verbs": [
                 "create",
                 "delete",
@@ -1651,7 +1753,7 @@
               ]
             }
           ],
-          "version": "v1beta3"
+          "version": "v1"
         },
         {
           "freshness": "Current",
@@ -1727,7 +1829,7 @@
               ]
             }
           ],
-          "version": "v1beta2"
+          "version": "v1beta3"
         }
       ]
     },
@@ -1825,6 +1927,26 @@
               ]
             },
             {
+              "resource": "resourceclaimparameters",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceClaimParameters",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "resourceclaimparameters",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
               "resource": "resourceclaims",
               "responseKind": {
                 "group": "",
@@ -1898,9 +2020,98 @@
                 "update",
                 "watch"
               ]
+            },
+            {
+              "resource": "resourceclassparameters",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceClassParameters",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "resourceclassparameters",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceslices",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceSlice",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "resourceslice",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
             }
           ],
           "version": "v1alpha2"
+        }
+      ]
+    },
+    {
+      "metadata": {
+        "creationTimestamp": null,
+        "name": "storagemigration.k8s.io"
+      },
+      "versions": [
+        {
+          "freshness": "Current",
+          "resources": [
+            {
+              "resource": "storageversionmigrations",
+              "responseKind": {
+                "group": "",
+                "kind": "StorageVersionMigration",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "storageversionmigration",
+              "subresources": [
+                {
+                  "responseKind": {
+                    "group": "",
+                    "kind": "StorageVersionMigration",
+                    "version": ""
+                  },
+                  "subresource": "status",
+                  "verbs": [
+                    "get",
+                    "patch",
+                    "update"
+                  ]
+                }
+              ],
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            }
+          ],
+          "version": "v1alpha1"
         }
       ]
     }

@@ -37,7 +37,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/transport"
-	"k8s.io/component-base/version"
+	"k8s.io/component-base/tracing"
 	v1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	v1helper "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1/helper"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
@@ -77,11 +77,6 @@ const (
 
 // ExtraConfig represents APIServices-specific configuration
 type ExtraConfig struct {
-	// PeerCAFile is the ca bundle used by this kube-apiserver to verify peer apiservers'
-	// serving certs when routing a request to the peer in the case the request can not be served
-	// locally due to version skew.
-	PeerCAFile string
-
 	// PeerAdvertiseAddress is the IP for this kube-apiserver which is used by peer apiservers to route a request
 	// to this apiserver. This happens in cases where the peer is not able to serve the request due to
 	// version skew. If unset, AdvertiseAddress/BindAddress will be used.
@@ -100,6 +95,13 @@ type ExtraConfig struct {
 	ServiceResolver ServiceResolver
 
 	RejectForwardingRedirects bool
+
+	// DisableAvailableConditionController disables the controller that updates the Available conditions for
+	// APIServices, Endpoints and Services. This controller runs in kube-aggregator and can interfere with
+	// Generic Control Plane components when certain apis are not available.
+	// TODO: We should find a better way to handle this. For now it will be for Generic Control Plane authors to
+	// disable this controller if they see issues.
+	DisableAvailableConditionController bool
 }
 
 // Config represents the configuration needed to create an APIAggregator.
@@ -120,7 +122,7 @@ type CompletedConfig struct {
 }
 
 type runnable interface {
-	Run(stopCh <-chan struct{}) error
+	RunWithContext(ctx context.Context) error
 }
 
 // preparedGenericAPIServer is a private wrapper that enforces a call of PrepareRun() before Run can be invoked.
@@ -144,8 +146,9 @@ type APIAggregator struct {
 
 	// proxyHandlers are the proxy handlers that are currently registered, keyed by apiservice.name
 	proxyHandlers map[string]*proxyHandler
-	// handledGroups are the groups that already have routes
-	handledGroups sets.String
+	// handledGroupVersions contain the groups that already have routes. The key is the name of the group and the value
+	// is the versions for the group.
+	handledGroupVersions map[string]sets.Set[string]
 
 	// lister is used to add group handling for /apis/<group> aggregator lookups based on
 	// controller state
@@ -158,7 +161,7 @@ type APIAggregator struct {
 	openAPIConfig *openapicommon.Config
 
 	// Enable OpenAPI V3 if these configs are non-nil
-	openAPIV3Config *openapicommon.Config
+	openAPIV3Config *openapicommon.OpenAPIV3Config
 
 	// openAPIAggregationController downloads and merges OpenAPI v2 specs.
 	openAPIAggregationController *openapicontroller.AggregationController
@@ -173,6 +176,9 @@ type APIAggregator struct {
 
 	// rejectForwardingRedirects is whether to allow to forward redirect response
 	rejectForwardingRedirects bool
+
+	// tracerProvider is used to wrap the proxy transport and handler with tracing
+	tracerProvider tracing.TracerProvider
 }
 
 // Complete fills in any fields not set that are required to have valid data. It's mutating the receiver.
@@ -185,8 +191,6 @@ func (cfg *Config) Complete() CompletedConfig {
 	// the kube aggregator wires its own discovery mechanism
 	// TODO eventually collapse this by extracting all of the discovery out
 	c.GenericConfig.EnableDiscovery = false
-	version := version.Get()
-	c.GenericConfig.Version = &version
 
 	return CompletedConfig{&c}
 }
@@ -235,7 +239,7 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		delegateHandler:            delegationTarget.UnprotectedHandler(),
 		proxyTransportDial:         proxyTransportDial,
 		proxyHandlers:              map[string]*proxyHandler{},
-		handledGroups:              sets.String{},
+		handledGroupVersions:       map[string]sets.Set[string]{},
 		lister:                     informerFactory.Apiregistration().V1().APIServices().Lister(),
 		APIRegistrationInformers:   informerFactory,
 		serviceResolver:            c.ExtraConfig.ServiceResolver,
@@ -243,10 +247,11 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		openAPIV3Config:            c.GenericConfig.OpenAPIV3Config,
 		proxyCurrentCertKeyContent: func() (bytes []byte, bytes2 []byte) { return nil, nil },
 		rejectForwardingRedirects:  c.ExtraConfig.RejectForwardingRedirects,
+		tracerProvider:             c.GenericConfig.TracerProvider,
 	}
 
 	// used later  to filter the served resource by those that have expired.
-	resourceExpirationEvaluator, err := genericapiserver.NewResourceExpirationEvaluator(*c.GenericConfig.Version)
+	resourceExpirationEvaluator, err := genericapiserver.NewResourceExpirationEvaluator(s.GenericAPIServer.EffectiveVersion.EmulationVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -309,24 +314,35 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		})
 	}
 
-	availableController, err := statuscontrollers.NewAvailableConditionController(
-		informerFactory.Apiregistration().V1().APIServices(),
-		c.GenericConfig.SharedInformerFactory.Core().V1().Services(),
-		c.GenericConfig.SharedInformerFactory.Core().V1().Endpoints(),
-		apiregistrationClient.ApiregistrationV1(),
-		proxyTransportDial,
-		(func() ([]byte, []byte))(s.proxyCurrentCertKeyContent),
-		s.serviceResolver,
-	)
-	if err != nil {
-		return nil, err
+	// If the AvailableConditionController is disabled, we don't need to start the informers
+	// and the controller.
+	if !c.ExtraConfig.DisableAvailableConditionController {
+		availableController, err := statuscontrollers.NewAvailableConditionController(
+			informerFactory.Apiregistration().V1().APIServices(),
+			c.GenericConfig.SharedInformerFactory.Core().V1().Services(),
+			c.GenericConfig.SharedInformerFactory.Core().V1().Endpoints(),
+			apiregistrationClient.ApiregistrationV1(),
+			proxyTransportDial,
+			(func() ([]byte, []byte))(s.proxyCurrentCertKeyContent),
+			s.serviceResolver,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		s.GenericAPIServer.AddPostStartHookOrDie("start-kube-aggregator-informers", func(context genericapiserver.PostStartHookContext) error {
+			informerFactory.Start(context.Done())
+			c.GenericConfig.SharedInformerFactory.Start(context.Done())
+			return nil
+		})
+
+		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-status-available-controller", func(context genericapiserver.PostStartHookContext) error {
+			// if we end up blocking for long periods of time, we may need to increase workers.
+			go availableController.Run(5, context.Done())
+			return nil
+		})
 	}
 
-	s.GenericAPIServer.AddPostStartHookOrDie("start-kube-aggregator-informers", func(context genericapiserver.PostStartHookContext) error {
-		informerFactory.Start(context.StopCh)
-		c.GenericConfig.SharedInformerFactory.Start(context.StopCh)
-		return nil
-	})
 	s.GenericAPIServer.AddPostStartHookOrDie("apiservice-registration-controller", func(context genericapiserver.PostStartHookContext) error {
 		go apiserviceRegistrationController.Run(context.StopCh, apiServiceRegistrationControllerInitiated)
 		select {
@@ -336,11 +352,42 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 
 		return nil
 	})
-	s.GenericAPIServer.AddPostStartHookOrDie("apiservice-status-available-controller", func(context genericapiserver.PostStartHookContext) error {
-		// if we end up blocking for long periods of time, we may need to increase workers.
-		go availableController.Run(5, context.StopCh)
-		return nil
-	})
+
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.AggregatedDiscoveryEndpoint) {
+		s.discoveryAggregationController = NewDiscoveryManager(
+			// Use aggregator as the source name to avoid overwriting native/CRD
+			// groups
+			s.GenericAPIServer.AggregatedDiscoveryGroupManager.WithSource(aggregated.AggregatorSource),
+		)
+
+		// Setup discovery endpoint
+		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-discovery-controller", func(context genericapiserver.PostStartHookContext) error {
+			// Discovery aggregation depends on the apiservice registration controller
+			// having the full list of APIServices already synced
+			select {
+			case <-context.StopCh:
+				return nil
+			// Context cancelled, should abort/clean goroutines
+			case <-apiServiceRegistrationControllerInitiated:
+			}
+
+			// Run discovery manager's worker to watch for new/removed/updated
+			// APIServices to the discovery document can be updated at runtime
+			// When discovery is ready, all APIServices will be present, with APIServices
+			// that have not successfully synced discovery to be present but marked as Stale.
+			discoverySyncedCh := make(chan struct{})
+			go s.discoveryAggregationController.Run(context.StopCh, discoverySyncedCh)
+
+			select {
+			case <-context.StopCh:
+				return nil
+			// Context cancelled, should abort/clean goroutines
+			case <-discoverySyncedCh:
+				// API services successfully sync
+			}
+			return nil
+		})
+	}
 
 	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.StorageVersionAPI) &&
 		utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerIdentity) {
@@ -406,25 +453,9 @@ func (s *APIAggregator) PrepareRun() (preparedAPIAggregator, error) {
 		})
 	}
 
-	if s.openAPIV3Config != nil && utilfeature.DefaultFeatureGate.Enabled(genericfeatures.OpenAPIV3) {
+	if s.openAPIV3Config != nil {
 		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-openapiv3-controller", func(context genericapiserver.PostStartHookContext) error {
 			go s.openAPIV3AggregationController.Run(context.StopCh)
-			return nil
-		})
-	}
-
-	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.AggregatedDiscoveryEndpoint) {
-		s.discoveryAggregationController = NewDiscoveryManager(
-			// Use aggregator as the source name to avoid overwriting native/CRD
-			// groups
-			s.GenericAPIServer.AggregatedDiscoveryGroupManager.WithSource(aggregated.AggregatorSource),
-		)
-
-		// Setup discovery endpoint
-		s.GenericAPIServer.AddPostStartHookOrDie("apiservice-discovery-controller", func(context genericapiserver.PostStartHookContext) error {
-			// Run discovery manager's worker to watch for new/removed/updated
-			// APIServices to the discovery document can be updated at runtime
-			go s.discoveryAggregationController.Run(context.StopCh)
 			return nil
 		})
 	}
@@ -446,13 +477,13 @@ func (s *APIAggregator) PrepareRun() (preparedAPIAggregator, error) {
 		s.openAPIAggregationController = openapicontroller.NewAggregationController(&specDownloader, openAPIAggregator)
 	}
 
-	if s.openAPIV3Config != nil && utilfeature.DefaultFeatureGate.Enabled(genericfeatures.OpenAPIV3) {
+	if s.openAPIV3Config != nil {
 		specDownloaderV3 := openapiv3aggregator.NewDownloader()
 		openAPIV3Aggregator, err := openapiv3aggregator.BuildAndRegisterAggregator(
 			specDownloaderV3,
 			s.GenericAPIServer.NextDelegate(),
 			s.GenericAPIServer.Handler.GoRestfulContainer,
-			s.openAPIConfig,
+			s.openAPIV3Config,
 			s.GenericAPIServer.Handler.NonGoRestfulMux)
 		if err != nil {
 			return preparedAPIAggregator{}, err
@@ -463,8 +494,8 @@ func (s *APIAggregator) PrepareRun() (preparedAPIAggregator, error) {
 	return preparedAPIAggregator{APIAggregator: s, runnable: prepared}, nil
 }
 
-func (s preparedAPIAggregator) Run(stopCh <-chan struct{}) error {
-	return s.runnable.Run(stopCh)
+func (s preparedAPIAggregator) Run(ctx context.Context) error {
+	return s.runnable.RunWithContext(ctx)
 }
 
 // AddAPIService adds an API service.  It is not thread-safe, so only call it on one thread at a time please.
@@ -502,6 +533,7 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 		proxyTransportDial:         s.proxyTransportDial,
 		serviceResolver:            s.serviceResolver,
 		rejectForwardingRedirects:  s.rejectForwardingRedirects,
+		tracerProvider:             s.tracerProvider,
 	}
 	proxyHandler.updateAPIService(apiService)
 	if s.openAPIAggregationController != nil {
@@ -524,7 +556,9 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 	}
 
 	// if we've already registered the path with the handler, we don't want to do it again.
-	if s.handledGroups.Has(apiService.Spec.Group) {
+	versions, exist := s.handledGroupVersions[apiService.Spec.Group]
+	if exist {
+		versions.Insert(apiService.Spec.Version)
 		return nil
 	}
 
@@ -539,7 +573,7 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 	// aggregation is protected
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle(groupPath, groupDiscoveryHandler)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.UnlistedHandle(groupPath+"/", groupDiscoveryHandler)
-	s.handledGroups.Insert(apiService.Spec.Group)
+	s.handledGroupVersions[apiService.Spec.Group] = sets.New[string](apiService.Spec.Version)
 	return nil
 }
 
@@ -568,8 +602,18 @@ func (s *APIAggregator) RemoveAPIService(apiServiceName string) {
 	}
 	delete(s.proxyHandlers, apiServiceName)
 
-	// TODO unregister group level discovery when there are no more versions for the group
-	// We don't need this right away because the handler properly delegates when no versions are present
+	versions, exist := s.handledGroupVersions[version.Group]
+	if !exist {
+		return
+	}
+	versions.Delete(version.Version)
+	if versions.Len() > 0 {
+		return
+	}
+	delete(s.handledGroupVersions, version.Group)
+	groupPath := "/apis/" + version.Group
+	s.GenericAPIServer.Handler.NonGoRestfulMux.Unregister(groupPath)
+	s.GenericAPIServer.Handler.NonGoRestfulMux.Unregister(groupPath + "/")
 }
 
 // DefaultAPIResourceConfigSource returns default configuration for an APIResource.

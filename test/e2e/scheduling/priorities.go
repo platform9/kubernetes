@@ -86,7 +86,7 @@ func nodesAreTooUtilized(ctx context.Context, cs clientset.Interface, nodeList *
 }
 
 // This test suite is used to verifies scheduler priority functions based on the default provider
-var _ = SIGDescribe("SchedulerPriorities [Serial]", func() {
+var _ = SIGDescribe("SchedulerPriorities", framework.WithSerial(), func() {
 	var cs clientset.Interface
 	var nodeList *v1.NodeList
 	var systemPodsNo int
@@ -109,7 +109,7 @@ var _ = SIGDescribe("SchedulerPriorities [Serial]", func() {
 
 		err = framework.CheckTestingNSDeletedExcept(ctx, cs, ns)
 		framework.ExpectNoError(err)
-		err = e2epod.WaitForPodsRunningReady(ctx, cs, metav1.NamespaceSystem, int32(systemPodsNo), 0, framework.PodReadyBeforeTimeout)
+		err = e2epod.WaitForPodsRunningReady(ctx, cs, metav1.NamespaceSystem, systemPodsNo, framework.PodReadyBeforeTimeout)
 		framework.ExpectNoError(err)
 
 		// skip if the most utilized node has less than the cri-o minMemLimit available
@@ -199,7 +199,7 @@ var _ = SIGDescribe("SchedulerPriorities [Serial]", func() {
 		labelPod, err := cs.CoreV1().Pods(ns).Get(ctx, labelPodName, metav1.GetOptions{})
 		framework.ExpectNoError(err)
 		ginkgo.By("Verify the pod was scheduled to the expected node.")
-		framework.ExpectNotEqual(labelPod.Spec.NodeName, nodeName)
+		gomega.Expect(labelPod.Spec.NodeName).ToNot(gomega.Equal(nodeName))
 	})
 
 	ginkgo.It("Pod should be preferably scheduled to nodes pod can tolerate", func(ctx context.Context) {

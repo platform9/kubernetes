@@ -105,6 +105,10 @@ template:
                 - valuesValue
               matchLabels:
                 matchLabelsKey: matchLabelsValue
+            matchLabelKeys:
+            - matchLabelKeysValue
+            mismatchLabelKeys:
+            - mismatchLabelKeysValue
             namespaceSelector:
               matchExpressions:
               - key: keyValue
@@ -126,6 +130,10 @@ template:
               - valuesValue
             matchLabels:
               matchLabelsKey: matchLabelsValue
+          matchLabelKeys:
+          - matchLabelKeysValue
+          mismatchLabelKeys:
+          - mismatchLabelKeysValue
           namespaceSelector:
             matchExpressions:
             - key: keyValue
@@ -148,6 +156,10 @@ template:
                 - valuesValue
               matchLabels:
                 matchLabelsKey: matchLabelsValue
+            matchLabelKeys:
+            - matchLabelKeysValue
+            mismatchLabelKeys:
+            - mismatchLabelKeysValue
             namespaceSelector:
               matchExpressions:
               - key: keyValue
@@ -169,6 +181,10 @@ template:
               - valuesValue
             matchLabels:
               matchLabelsKey: matchLabelsValue
+          matchLabelKeys:
+          - matchLabelKeysValue
+          mismatchLabelKeys:
+          - mismatchLabelKeysValue
           namespaceSelector:
             matchExpressions:
             - key: keyValue
@@ -228,6 +244,8 @@ template:
             path: pathValue
             port: portValue
             scheme: schemeValue
+          sleep:
+            seconds: 1
           tcpSocket:
             host: hostValue
             port: portValue
@@ -243,6 +261,8 @@ template:
             path: pathValue
             port: portValue
             scheme: schemeValue
+          sleep:
+            seconds: 1
           tcpSocket:
             host: hostValue
             port: portValue
@@ -314,6 +334,9 @@ template:
       restartPolicy: restartPolicyValue
       securityContext:
         allowPrivilegeEscalation: true
+        appArmorProfile:
+          localhostProfile: localhostProfileValue
+          type: typeValue
         capabilities:
           add:
           - addValue
@@ -375,6 +398,7 @@ template:
         mountPropagation: mountPropagationValue
         name: nameValue
         readOnly: true
+        recursiveReadOnly: recursiveReadOnlyValue
         subPath: subPathValue
         subPathExpr: subPathExprValue
       workingDir: workingDirValue
@@ -435,6 +459,8 @@ template:
             path: pathValue
             port: portValue
             scheme: schemeValue
+          sleep:
+            seconds: 1
           tcpSocket:
             host: hostValue
             port: portValue
@@ -450,6 +476,8 @@ template:
             path: pathValue
             port: portValue
             scheme: schemeValue
+          sleep:
+            seconds: 1
           tcpSocket:
             host: hostValue
             port: portValue
@@ -521,6 +549,9 @@ template:
       restartPolicy: restartPolicyValue
       securityContext:
         allowPrivilegeEscalation: true
+        appArmorProfile:
+          localhostProfile: localhostProfileValue
+          type: typeValue
         capabilities:
           add:
           - addValue
@@ -583,6 +614,7 @@ template:
         mountPropagation: mountPropagationValue
         name: nameValue
         readOnly: true
+        recursiveReadOnly: recursiveReadOnlyValue
         subPath: subPathValue
         subPathExpr: subPathExprValue
       workingDir: workingDirValue
@@ -644,6 +676,8 @@ template:
             path: pathValue
             port: portValue
             scheme: schemeValue
+          sleep:
+            seconds: 1
           tcpSocket:
             host: hostValue
             port: portValue
@@ -659,6 +693,8 @@ template:
             path: pathValue
             port: portValue
             scheme: schemeValue
+          sleep:
+            seconds: 1
           tcpSocket:
             host: hostValue
             port: portValue
@@ -730,6 +766,9 @@ template:
       restartPolicy: restartPolicyValue
       securityContext:
         allowPrivilegeEscalation: true
+        appArmorProfile:
+          localhostProfile: localhostProfileValue
+          type: typeValue
         capabilities:
           add:
           - addValue
@@ -791,6 +830,7 @@ template:
         mountPropagation: mountPropagationValue
         name: nameValue
         readOnly: true
+        recursiveReadOnly: recursiveReadOnlyValue
         subPath: subPathValue
         subPathExpr: subPathExprValue
       workingDir: workingDirValue
@@ -817,6 +857,9 @@ template:
     schedulingGates:
     - name: nameValue
     securityContext:
+      appArmorProfile:
+        localhostProfile: localhostProfileValue
+        type: typeValue
       fsGroup: 5
       fsGroupChangePolicy: fsGroupChangePolicyValue
       runAsGroup: 6
@@ -832,6 +875,7 @@ template:
         type: typeValue
       supplementalGroups:
       - 4
+      supplementalGroupsPolicy: supplementalGroupsPolicyValue
       sysctls:
       - name: nameValue
         value: valueValue
@@ -992,6 +1036,7 @@ template:
               matchLabels:
                 matchLabelsKey: matchLabelsValue
             storageClassName: storageClassNameValue
+            volumeAttributesClassName: volumeAttributesClassNameValue
             volumeMode: volumeModeValue
             volumeName: volumeNameValue
       fc:
@@ -1061,7 +1106,20 @@ template:
       projected:
         defaultMode: 2
         sources:
-        - configMap:
+        - clusterTrustBundle:
+            labelSelector:
+              matchExpressions:
+              - key: keyValue
+                operator: operatorValue
+                values:
+                - valuesValue
+              matchLabels:
+                matchLabelsKey: matchLabelsValue
+            name: nameValue
+            optional: true
+            path: pathValue
+            signerName: signerNameValue
+          configMap:
             items:
             - key: keyValue
               mode: 3

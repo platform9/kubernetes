@@ -484,7 +484,7 @@ func TestPreemption(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.PodDisruptionConditions, test.enablePodDisruptionConditions)()
+			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.PodDisruptionConditions, test.enablePodDisruptionConditions)
 			filter.Tokens = test.initTokens
 			filter.EnablePreFilter = test.enablePreFilter
 			filter.Unresolvable = test.unresolvable
@@ -513,7 +513,7 @@ func TestPreemption(t *testing.T) {
 						t.Errorf("Error %v when getting the updated status for pod %v/%v ", err, p.Namespace, p.Name)
 					}
 					_, cond := podutil.GetPodCondition(&pod.Status, v1.DisruptionTarget)
-					if test.enablePodDisruptionConditions == true && cond == nil {
+					if test.enablePodDisruptionConditions && cond == nil {
 						t.Errorf("Pod %q does not have the expected condition: %q", klog.KObj(pod), v1.DisruptionTarget)
 					} else if test.enablePodDisruptionConditions == false && cond != nil {
 						t.Errorf("Pod %q has an unexpected condition: %q", klog.KObj(pod), v1.DisruptionTarget)
@@ -679,7 +679,7 @@ func TestDisablePreemption(t *testing.T) {
 				t.Errorf("Error while creating high priority pod: %v", err)
 			}
 			// Ensure preemptor should keep unschedulable.
-			if err := waitForPodUnschedulable(cs, preemptor); err != nil {
+			if err := waitForPodUnschedulable(testCtx.Ctx, cs, preemptor); err != nil {
 				t.Errorf("Preemptor %v should not become scheduled", preemptor.Name)
 			}
 
@@ -1521,8 +1521,8 @@ func initTestPreferNominatedNode(t *testing.T, nsPrefix string, opts ...schedule
 	testutils.SyncSchedulerInformerFactory(testCtx)
 	// wraps the NextPod() method to make it appear the preemption has been done already and the nominated node has been set.
 	f := testCtx.Scheduler.NextPod
-	testCtx.Scheduler.NextPod = func() (*framework.QueuedPodInfo, error) {
-		podInfo, _ := f()
+	testCtx.Scheduler.NextPod = func(logger klog.Logger) (*framework.QueuedPodInfo, error) {
+		podInfo, _ := f(klog.FromContext(testCtx.Ctx))
 		// Scheduler.Next() may return nil when scheduler is shutting down.
 		if podInfo != nil {
 			podInfo.Pod.Status.NominatedNodeName = "node-1"
@@ -1648,8 +1648,6 @@ func TestPreferNominatedNode(t *testing.T) {
 // TestReadWriteOncePodPreemption tests preemption scenarios for pods with
 // ReadWriteOncePod PVCs.
 func TestReadWriteOncePodPreemption(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.ReadWriteOncePod, true)()
-
 	cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
 		Profiles: []configv1.KubeSchedulerProfile{{
 			SchedulerName: pointer.StringPtr(v1.DefaultSchedulerName),

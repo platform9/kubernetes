@@ -62,21 +62,21 @@ type Controller interface {
 
 // Driver provides the actual allocation and deallocation operations.
 type Driver interface {
-	// GetClassParameters gets called to retrieve the parameter object
+	// GetClassParameters is called to retrieve the parameter object
 	// referenced by a class. The content should be validated now if
 	// possible. class.Parameters may be nil.
 	//
-	// The caller will wrap the error to include the parameter reference.
+	// The caller wraps the error to include the parameter reference.
 	GetClassParameters(ctx context.Context, class *resourcev1alpha2.ResourceClass) (interface{}, error)
 
-	// GetClaimParameters gets called to retrieve the parameter object
+	// GetClaimParameters is called to retrieve the parameter object
 	// referenced by a claim. The content should be validated now if
 	// possible. claim.Spec.Parameters may be nil.
 	//
-	// The caller will wrap the error to include the parameter reference.
+	// The caller wraps the error to include the parameter reference.
 	GetClaimParameters(ctx context.Context, claim *resourcev1alpha2.ResourceClaim, class *resourcev1alpha2.ResourceClass, classParameters interface{}) (interface{}, error)
 
-	// Allocate gets called when all same-driver ResourceClaims for Pod are ready
+	// Allocate is called when all same-driver ResourceClaims for Pod are ready
 	// to be allocated. The selectedNode is empty for ResourceClaims with immediate
 	// allocation, in which case the resource driver decides itself where
 	// to allocate. If there is already an on-going allocation, the driver
@@ -86,15 +86,15 @@ type Driver interface {
 	// Parameters have been retrieved earlier.
 	//
 	// Driver must set the result of allocation for every claim in "claims"
-	// parameter items. In case if there was no error encountered and allocation
-	// was successful - claims[i].Allocation field should be set. In case of
-	// particular claim allocation fail - respective item's claims[i].Error field
-	// should be set, in this case claims[i].Allocation will be ignored.
+	// parameter items. If there is no error and allocation
+	// is successful - claims[i].Allocation field should be set. In case of
+	// particular claim allocation failure - respective item's claims[i].Error field
+	// should be set and claims[i].Allocation will be ignored.
 	//
 	// If selectedNode is set, the driver must attempt to allocate for that
 	// node. If that is not possible, it must return an error. The
 	// controller will call UnsuitableNodes and pass the new information to
-	// the scheduler, which then will lead to selecting a diffent node
+	// the scheduler, which will then lead to selecting a different node
 	// if the current one is not suitable.
 	//
 	// The Claim, ClaimParameters, Class, ClassParameters fields of "claims" parameter
@@ -108,7 +108,7 @@ type Driver interface {
 	// idempotent. In particular it must not return an error when the claim
 	// is currently not allocated.
 	//
-	// Deallocate may get called when a previous allocation got
+	// Deallocate may be called when a previous allocation got
 	// interrupted. Deallocate must then stop any on-going allocation
 	// activity and free resources before returning without an error.
 	Deallocate(ctx context.Context, claim *resourcev1alpha2.ResourceClaim) error
@@ -118,8 +118,8 @@ type Driver interface {
 	// and parameters have been retrieved.
 	//
 	// The driver may consider each claim in isolation, but it's better
-	// to mark nodes as unsuitable for all claims if it not all claims
-	// can be allocated for it (for example, two GPUs requested but
+	// to mark nodes as unsuitable for all claims, if all claims
+	// cannot be allocated for it (for example, two GPUs requested but
 	// the node only has one).
 	//
 	// The potentialNodes slice contains all potential nodes selected
@@ -163,7 +163,7 @@ type controller struct {
 	setReservedFor      bool
 	kubeClient          kubernetes.Interface
 	claimNameLookup     *resourceclaim.Lookup
-	queue               workqueue.RateLimitingInterface
+	queue               workqueue.TypedRateLimitingInterface[string]
 	eventRecorder       record.EventRecorder
 	rcLister            resourcev1alpha2listers.ResourceClassLister
 	rcSynced            cache.InformerSynced
@@ -189,7 +189,7 @@ func New(
 	schedulingCtxInformer := informerFactory.Resource().V1alpha2().PodSchedulingContexts()
 	claimNameLookup := resourceclaim.NewNameLookup(kubeClient)
 
-	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	go func() {
 		<-ctx.Done()
 		eventBroadcaster.Shutdown()
@@ -208,8 +208,10 @@ func New(
 		v1.EventSource{Component: fmt.Sprintf("resource driver %s", name)})
 
 	// The work queue contains either keys for claims or PodSchedulingContext objects.
-	queue := workqueue.NewNamedRateLimitingQueue(
-		workqueue.DefaultControllerRateLimiter(), fmt.Sprintf("%s-queue", name))
+	queue := workqueue.NewTypedRateLimitingQueueWithConfig(
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: fmt.Sprintf("%s-queue", name)},
+	)
 
 	// The mutation cache acts as an additional layer for the informer
 	// cache and after an update made by the controller returns a more
@@ -357,7 +359,6 @@ func (ctrl *controller) Run(workers int) {
 var errRequeue = errors.New("requeue")
 
 // errPeriodic is a special error instance that functions can return
-// to request silent instance that functions can return
 // to request silent retrying at a fixed rate.
 var errPeriodic = errors.New("periodic")
 
@@ -372,7 +373,7 @@ func (ctrl *controller) sync() {
 	logger := klog.LoggerWithValues(ctrl.logger, "key", key)
 	ctx := klog.NewContext(ctrl.ctx, logger)
 	logger.V(4).Info("processing")
-	obj, err := ctrl.syncKey(ctx, key.(string))
+	obj, err := ctrl.syncKey(ctx, key)
 	switch err {
 	case nil:
 		logger.V(5).Info("completed")
@@ -536,8 +537,9 @@ func (ctrl *controller) syncClaim(ctx context.Context, claim *resourcev1alpha2.R
 		return errRequeue
 	}
 
-	// Check parameters.
-	claimParameters, classParameters, err := ctrl.getParameters(ctx, claim, class)
+	// Check parameters. Do not record event to Claim if its parameters are invalid,
+	// syncKey will record the error.
+	claimParameters, classParameters, err := ctrl.getParameters(ctx, claim, class, false)
 	if err != nil {
 		return err
 	}
@@ -558,14 +560,18 @@ func (ctrl *controller) syncClaim(ctx context.Context, claim *resourcev1alpha2.R
 	return nil
 }
 
-func (ctrl *controller) getParameters(ctx context.Context, claim *resourcev1alpha2.ResourceClaim, class *resourcev1alpha2.ResourceClass) (claimParameters, classParameters interface{}, err error) {
+func (ctrl *controller) getParameters(ctx context.Context, claim *resourcev1alpha2.ResourceClaim, class *resourcev1alpha2.ResourceClass, notifyClaim bool) (claimParameters, classParameters interface{}, err error) {
 	classParameters, err = ctrl.driver.GetClassParameters(ctx, class)
 	if err != nil {
+		ctrl.eventRecorder.Event(class, v1.EventTypeWarning, "Failed", err.Error())
 		err = fmt.Errorf("class parameters %s: %v", class.ParametersRef, err)
 		return
 	}
 	claimParameters, err = ctrl.driver.GetClaimParameters(ctx, claim, class, classParameters)
 	if err != nil {
+		if notifyClaim {
+			ctrl.eventRecorder.Event(claim, v1.EventTypeWarning, "Failed", err.Error())
+		}
 		err = fmt.Errorf("claim parameters %s: %v", claim.Spec.ParametersRef, err)
 		return
 	}
@@ -688,9 +694,10 @@ func (ctrl *controller) checkPodClaim(ctx context.Context, pod *v1.Pod, podClaim
 	if class.DriverName != ctrl.name {
 		return nil, nil
 	}
-	// Check parameters.
-	claimParameters, classParameters, err := ctrl.getParameters(ctx, claim, class)
+	// Check parameters. Record event to claim and pod if parameters are invalid.
+	claimParameters, classParameters, err := ctrl.getParameters(ctx, claim, class, true)
 	if err != nil {
+		ctrl.eventRecorder.Event(pod, v1.EventTypeWarning, "Failed", fmt.Sprintf("claim %v: %v", claim.Name, err.Error()))
 		return nil, err
 	}
 	return &ClaimAllocation{

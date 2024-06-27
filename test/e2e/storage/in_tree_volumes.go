@@ -19,7 +19,6 @@ package storage
 import (
 	"os"
 
-	"github.com/onsi/ginkgo/v2"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/storage/drivers"
 	storageframework "k8s.io/kubernetes/test/e2e/storage/framework"
@@ -31,8 +30,6 @@ import (
 var testDrivers = []func() storageframework.TestDriver{
 	drivers.InitNFSDriver,
 	drivers.InitISCSIDriver,
-	drivers.InitRbdDriver,
-	drivers.InitCephFSDriver,
 	drivers.InitHostPathDriver,
 	drivers.InitHostPathSymlinkDriver,
 	drivers.InitEmptydirDriver,
@@ -40,7 +37,6 @@ var testDrivers = []func() storageframework.TestDriver{
 	drivers.InitVSphereDriver,
 	drivers.InitAzureDiskDriver,
 	drivers.InitAzureFileDriver,
-	drivers.InitAwsDriver,
 	drivers.InitLocalDriverWithVolumeType(utils.LocalVolumeDirectory),
 	drivers.InitLocalDriverWithVolumeType(utils.LocalVolumeDirectoryLink),
 	drivers.InitLocalDriverWithVolumeType(utils.LocalVolumeDirectoryBindMounted),
@@ -60,6 +56,9 @@ var _ = utils.SIGDescribe("In-tree Volumes", func() {
 			testDrivers = append(testDrivers, drivers.InitGcePdDriver)
 			testDrivers = append(testDrivers, drivers.InitWindowsGcePdDriver)
 			gceEnabled = true
+		case "aws":
+			testDrivers = append(testDrivers, drivers.InitAwsDriver)
+			framework.Logf("Enabled aws in-tree volume drivers")
 		default:
 			framework.Failf("Invalid volume type %s in %v", driver, framework.TestContext.EnabledVolumeDrivers)
 		}
@@ -80,8 +79,8 @@ var _ = utils.SIGDescribe("In-tree Volumes", func() {
 	for _, initDriver := range testDrivers {
 		curDriver := initDriver()
 
-		ginkgo.Context(storageframework.GetDriverNameWithFeatureTags(curDriver), func() {
+		framework.Context(append(storageframework.GetDriverNameWithFeatureTags(curDriver), func() {
 			storageframework.DefineTestSuites(curDriver, testsuites.BaseSuites)
-		})
+		})...)
 	}
 })

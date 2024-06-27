@@ -37,7 +37,7 @@ import (
 	"k8s.io/kubernetes/pkg/proxy/healthcheck"
 	fakehcn "k8s.io/kubernetes/pkg/proxy/winkernel/testing"
 	netutils "k8s.io/utils/net"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -46,7 +46,6 @@ const (
 	ipAddress         = "10.0.0.1"
 	prefixLen         = 24
 	macAddress        = "00-11-22-33-44-55"
-	clusterCIDR       = "192.168.1.0/24"
 	destinationPrefix = "192.168.2.0/24"
 	providerAddress   = "10.0.0.3"
 	guid              = "123ABC"
@@ -84,7 +83,7 @@ func newHnsNetwork(networkInfo *hnsNetworkInfo) *hcn.HostComputeNetwork {
 	return network
 }
 
-func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clusterCIDR string, hostname string, nodeIP net.IP, networkType string) *Proxier {
+func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, hostname string, nodeIP net.IP, networkType string) *Proxier {
 	sourceVip := "192.168.1.2"
 	var remoteSubnets []*remoteSubnetInfo
 	rs := &remoteSubnetInfo{
@@ -105,7 +104,6 @@ func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clust
 	proxier := &Proxier{
 		svcPortMap:          make(proxy.ServicePortMap),
 		endpointsMap:        make(proxy.EndpointsMap),
-		clusterCIDR:         clusterCIDR,
 		hostname:            testHostName,
 		nodeIP:              nodeIP,
 		serviceHealthServer: healthcheck.NewFakeServiceHealthServer(),
@@ -132,7 +130,7 @@ func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clust
 
 func TestCreateServiceVip(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -146,7 +144,6 @@ func TestCreateServiceVip(t *testing.T) {
 		Port:           "p80",
 		Protocol:       v1.ProtocolTCP,
 	}
-	timeoutSeconds := v1.DefaultClientIPServiceAffinitySeconds
 
 	makeServiceMap(proxier,
 		makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {
@@ -156,7 +153,7 @@ func TestCreateServiceVip(t *testing.T) {
 			svc.Spec.SessionAffinity = v1.ServiceAffinityClientIP
 			svc.Spec.SessionAffinityConfig = &v1.SessionAffinityConfig{
 				ClientIP: &v1.ClientIPConfig{
-					TimeoutSeconds: &timeoutSeconds,
+					TimeoutSeconds: ptr.To[int32](v1.DefaultClientIPServiceAffinitySeconds),
 				},
 			}
 			svc.Spec.Ports = []v1.ServicePort{{
@@ -187,7 +184,7 @@ func TestCreateServiceVip(t *testing.T) {
 
 func TestCreateRemoteEndpointOverlay(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -200,7 +197,6 @@ func TestCreateRemoteEndpointOverlay(t *testing.T) {
 		Port:           "p80",
 		Protocol:       v1.ProtocolTCP,
 	}
-	tcpProtocol := v1.ProtocolTCP
 
 	makeServiceMap(proxier,
 		makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {
@@ -221,9 +217,9 @@ func TestCreateRemoteEndpointOverlay(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -253,19 +249,18 @@ func TestCreateRemoteEndpointOverlay(t *testing.T) {
 
 func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
 	if proxier == nil {
 		t.Error()
 	}
 
-	tcpProtocol := v1.ProtocolTCP
 	svcIP := "10.20.30.41"
 	svcPort := 80
 	svcNodePort := 3001
 	svcPortName := proxy.ServicePortName{
 		NamespacedName: makeNSN("ns1", "svc1"),
 		Port:           "p80",
-		Protocol:       tcpProtocol,
+		Protocol:       v1.ProtocolTCP,
 	}
 
 	makeServiceMap(proxier,
@@ -275,7 +270,7 @@ func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 			svc.Spec.Ports = []v1.ServicePort{{
 				Name:     svcPortName.Port,
 				Port:     int32(svcPort),
-				Protocol: tcpProtocol,
+				Protocol: v1.ProtocolTCP,
 				NodePort: int32(svcNodePort),
 			}}
 		}),
@@ -287,9 +282,9 @@ func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -316,8 +311,7 @@ func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 }
 func TestSharedRemoteEndpointDelete(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	tcpProtocol := v1.ProtocolTCP
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
 	if proxier == nil {
 		t.Error()
 	}
@@ -369,9 +363,9 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName1.Port),
-				Port:     pointer.Int32(int32(svcPort1)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName1.Port),
+				Port:     ptr.To(int32(svcPort1)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		makeTestEndpointSlice(svcPortName2.Namespace, svcPortName2.Name, 1, func(eps *discovery.EndpointSlice) {
@@ -380,9 +374,9 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName2.Port),
-				Port:     pointer.Int32(int32(svcPort2)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName2.Port),
+				Port:     ptr.To(int32(svcPort2)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -428,9 +422,9 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName2.Port),
-				Port:     pointer.Int32(int32(svcPort2)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName2.Port),
+				Port:     ptr.To(int32(svcPort2)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -459,7 +453,7 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 }
 func TestSharedRemoteEndpointUpdate(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
 	if proxier == nil {
 		t.Error()
 	}
@@ -505,7 +499,6 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 		}),
 	)
 
-	tcpProtocol := v1.ProtocolTCP
 	populateEndpointSlices(proxier,
 		makeTestEndpointSlice(svcPortName1.Namespace, svcPortName1.Name, 1, func(eps *discovery.EndpointSlice) {
 			eps.AddressType = discovery.AddressTypeIPv4
@@ -513,9 +506,9 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName1.Port),
-				Port:     pointer.Int32(int32(svcPort1)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName1.Port),
+				Port:     ptr.To(int32(svcPort1)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		makeTestEndpointSlice(svcPortName2.Namespace, svcPortName2.Name, 1, func(eps *discovery.EndpointSlice) {
@@ -524,9 +517,9 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName2.Port),
-				Port:     pointer.Int32(int32(svcPort2)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName2.Port),
+				Port:     ptr.To(int32(svcPort2)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -583,9 +576,9 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName1.Port),
-				Port:     pointer.Int32(int32(svcPort1)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName1.Port),
+				Port:     ptr.To(int32(svcPort1)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		makeTestEndpointSlice(svcPortName1.Namespace, svcPortName1.Name, 1, func(eps *discovery.EndpointSlice) {
@@ -594,14 +587,14 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName1.Port),
-				Port:     pointer.Int32(int32(svcPort1)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName1.Port),
+				Port:     ptr.To(int32(svcPort1)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			},
 				{
-					Name:     pointer.String("p443"),
-					Port:     pointer.Int32(int32(443)),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("p443"),
+					Port:     ptr.To[int32](443),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}}
 		}))
 
@@ -634,8 +627,7 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 }
 func TestCreateLoadBalancer(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	tcpProtocol := v1.ProtocolTCP
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -668,9 +660,9 @@ func TestCreateLoadBalancer(t *testing.T) {
 				Addresses: []string{epIpAddressRemote},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -692,7 +684,7 @@ func TestCreateLoadBalancer(t *testing.T) {
 
 func TestCreateDsrLoadBalancer(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -723,18 +715,17 @@ func TestCreateDsrLoadBalancer(t *testing.T) {
 			}}
 		}),
 	)
-	tcpProtocol := v1.ProtocolTCP
 	populateEndpointSlices(proxier,
 		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
 			eps.AddressType = discovery.AddressTypeIPv4
 			eps.Endpoints = []discovery.Endpoint{{
 				Addresses: []string{epIpAddressRemote},
-				NodeName:  pointer.String("testhost"),
+				NodeName:  ptr.To("testhost"),
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -771,7 +762,7 @@ func TestCreateDsrLoadBalancer(t *testing.T) {
 // loadbalancers will be created.
 func TestClusterIPLBInCreateDsrLoadBalancer(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 
 	if proxier == nil {
 		t.Error()
@@ -803,18 +794,17 @@ func TestClusterIPLBInCreateDsrLoadBalancer(t *testing.T) {
 			}}
 		}),
 	)
-	tcpProtocol := v1.ProtocolTCP
 	populateEndpointSlices(proxier,
 		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
 			eps.AddressType = discovery.AddressTypeIPv4
 			eps.Endpoints = []discovery.Endpoint{{
 				Addresses: []string{epIpAddressRemote},
-				NodeName:  pointer.StringPtr("testhost2"), // This will make this endpoint as a remote endpoint
+				NodeName:  ptr.To("testhost2"), // This will make this endpoint as a remote endpoint
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.StringPtr(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -853,7 +843,7 @@ func TestClusterIPLBInCreateDsrLoadBalancer(t *testing.T) {
 
 func TestEndpointSlice(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -877,7 +867,6 @@ func TestEndpointSlice(t *testing.T) {
 	})
 
 	// Add initial endpoint slice
-	tcpProtocol := v1.ProtocolTCP
 	endpointSlice := &discovery.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-1", svcPortName.Name),
@@ -886,14 +875,14 @@ func TestEndpointSlice(t *testing.T) {
 		},
 		Ports: []discovery.EndpointPort{{
 			Name:     &svcPortName.Port,
-			Port:     pointer.Int32(80),
-			Protocol: &tcpProtocol,
+			Port:     ptr.To[int32](80),
+			Protocol: ptr.To(v1.ProtocolTCP),
 		}},
 		AddressType: discovery.AddressTypeIPv4,
 		Endpoints: []discovery.Endpoint{{
 			Addresses:  []string{"192.168.2.3"},
-			Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
-			NodeName:   pointer.String("testhost2"),
+			Conditions: discovery.EndpointConditions{Ready: ptr.To(true)},
+			NodeName:   ptr.To("testhost2"),
 		}},
 	}
 
@@ -934,7 +923,7 @@ func TestNoopEndpointSlice(t *testing.T) {
 
 func TestFindRemoteSubnetProviderAddress(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}

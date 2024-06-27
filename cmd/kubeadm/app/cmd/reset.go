@@ -32,8 +32,7 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmscheme "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/scheme"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
-	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/validation"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	phases "k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/reset"
@@ -66,7 +65,7 @@ type resetOptions struct {
 	kubeconfigPath        string
 	cfgPath               string
 	ignorePreflightErrors []string
-	externalcfg           *v1beta4.ResetConfiguration
+	externalcfg           *kubeadmapiv1.ResetConfiguration
 	skipCRIDetect         bool
 }
 
@@ -89,7 +88,7 @@ type resetData struct {
 // newResetOptions returns a struct ready for being used for creating cmd join flags.
 func newResetOptions() *resetOptions {
 	// initialize the public kubeadm config API by applying defaults
-	externalcfg := &v1beta4.ResetConfiguration{}
+	externalcfg := &kubeadmapiv1.ResetConfiguration{}
 	// Apply defaults
 	kubeadmscheme.Scheme.Default(externalcfg)
 	return &resetOptions{
@@ -108,7 +107,10 @@ func newResetData(cmd *cobra.Command, opts *resetOptions, in io.Reader, out io.W
 	var initCfg *kubeadmapi.InitConfiguration
 
 	// Either use the config file if specified, or convert public kubeadm API to the internal ResetConfiguration and validates cfg.
-	resetCfg, err := configutil.LoadOrDefaultResetConfiguration(opts.cfgPath, opts.externalcfg, allowExperimental, opts.skipCRIDetect)
+	resetCfg, err := configutil.LoadOrDefaultResetConfiguration(opts.cfgPath, opts.externalcfg, configutil.LoadOrDefaultConfigurationOptions{
+		AllowExperimental: allowExperimental,
+		SkipCRIDetect:     opts.skipCRIDetect,
+	})
 	if err != nil {
 		return nil, err
 	}

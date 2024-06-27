@@ -44,6 +44,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/coordination"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/policy"
+	resourceapi "k8s.io/kubernetes/pkg/apis/resource"
 	storage "k8s.io/kubernetes/pkg/apis/storage"
 	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
 	"k8s.io/utils/pointer"
@@ -393,6 +394,9 @@ func Test_nodePlugin_Admit(t *testing.T) {
 
 	configmappod, _ := makeTestPod("ns", "myconfigmappod", "mynode", true)
 	configmappod.Spec.Volumes = []api.Volume{{VolumeSource: api.VolumeSource{ConfigMap: &api.ConfigMapVolumeSource{LocalObjectReference: api.LocalObjectReference{Name: "foo"}}}}}
+
+	ctbpod, _ := makeTestPod("ns", "myctbpod", "mynode", true)
+	ctbpod.Spec.Volumes = []api.Volume{{VolumeSource: api.VolumeSource{Projected: &api.ProjectedVolumeSource{Sources: []api.VolumeProjection{{ClusterTrustBundle: &api.ClusterTrustBundleProjection{Name: pointer.String("foo")}}}}}}}
 
 	pvcpod, _ := makeTestPod("ns", "mypvcpod", "mynode", true)
 	pvcpod.Spec.Volumes = []api.Volume{{VolumeSource: api.VolumeSource{PersistentVolumeClaim: &api.PersistentVolumeClaimVolumeSource{ClaimName: "foo"}}}}
@@ -865,6 +869,12 @@ func Test_nodePlugin_Admit(t *testing.T) {
 			podsGetter: noExistingPods,
 			attributes: admission.NewAttributesRecord(configmappod, nil, podKind, configmappod.Namespace, configmappod.Name, podResource, "", admission.Create, &metav1.CreateOptions{}, false, mynode),
 			err:        "reference configmaps",
+		},
+		{
+			name:       "forbid create of pod referencing clustertrustbundle",
+			podsGetter: noExistingPods,
+			attributes: admission.NewAttributesRecord(ctbpod, nil, podKind, ctbpod.Namespace, ctbpod.Name, podResource, "", admission.Create, &metav1.CreateOptions{}, false, mynode),
+			err:        "reference clustertrustbundles",
 		},
 		{
 			name:       "forbid create of pod referencing persistentvolumeclaim",
@@ -1530,7 +1540,7 @@ func TestAdmitPVCStatus(t *testing.T) {
 			attributes := admission.NewAttributesRecord(
 				test.newObj, test.oldObj, schema.GroupVersionKind{},
 				metav1.NamespaceDefault, "foo", apiResource, test.subresource, operation, &metav1.CreateOptions{}, false, mynode)
-			defer featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.RecoverVolumeExpansionFailure, test.recoveryFeatureEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.RecoverVolumeExpansionFailure, test.recoveryFeatureEnabled)
 			a := &admitTestCase{
 				name:        test.name,
 				podsGetter:  noExistingPods,
@@ -1591,4 +1601,85 @@ func createPodAttributes(pod *api.Pod, user user.Info) admission.Attributes {
 	podResource := api.Resource("pods").WithVersion("v1")
 	podKind := api.Kind("Pod").WithVersion("v1")
 	return admission.NewAttributesRecord(pod, nil, podKind, pod.Namespace, pod.Name, podResource, "", admission.Create, &metav1.CreateOptions{}, false, user)
+}
+
+func TestAdmitResourceSlice(t *testing.T) {
+	apiResource := resourceapi.SchemeGroupVersion.WithResource("resourceslices")
+	nodename := "mynode"
+	mynode := &user.DefaultInfo{Name: "system:node:" + nodename, Groups: []string{"system:nodes"}}
+	err := "can only create ResourceSlice with the same NodeName as the requesting node"
+
+	sliceNode := &resourceapi.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "something",
+		},
+		NodeName: nodename,
+	}
+	sliceOtherNode := &resourceapi.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "something",
+		},
+		NodeName: nodename + "-other",
+	}
+
+	tests := map[string]struct {
+		operation      admission.Operation
+		obj            runtime.Object
+		featureEnabled bool
+		expectError    string
+	}{
+		"create allowed, enabled": {
+			operation:      admission.Create,
+			obj:            sliceNode,
+			featureEnabled: true,
+			expectError:    "",
+		},
+		"create disallowed, enabled": {
+			operation:      admission.Create,
+			obj:            sliceOtherNode,
+			featureEnabled: true,
+			expectError:    err,
+		},
+		"create allowed, disabled": {
+			operation:      admission.Create,
+			obj:            sliceNode,
+			featureEnabled: false,
+			expectError:    "",
+		},
+		"create disallowed, disabled": {
+			operation:      admission.Create,
+			obj:            sliceOtherNode,
+			featureEnabled: false,
+			expectError:    err,
+		},
+		"update allowed, same node": {
+			operation:      admission.Update,
+			obj:            sliceNode,
+			featureEnabled: true,
+			expectError:    "",
+		},
+		"update allowed, other node": {
+			operation:      admission.Update,
+			obj:            sliceOtherNode,
+			featureEnabled: true,
+			expectError:    "",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			attributes := admission.NewAttributesRecord(
+				test.obj, nil, schema.GroupVersionKind{},
+				"", "foo", apiResource, "", test.operation, &metav1.CreateOptions{}, false, mynode)
+			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DynamicResourceAllocation, test.featureEnabled)
+			a := &admitTestCase{
+				name:       name,
+				attributes: attributes,
+				features:   feature.DefaultFeatureGate,
+				err:        test.expectError,
+			}
+			a.run(t)
+		})
+
+	}
 }

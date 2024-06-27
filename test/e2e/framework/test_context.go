@@ -99,13 +99,14 @@ var (
 // Test suite authors can use framework/viper to make all command line
 // parameters also configurable via a configuration file.
 type TestContextType struct {
-	KubeConfig         string
-	KubeContext        string
-	KubeAPIContentType string
-	KubeletRootDir     string
-	CertDir            string
-	Host               string
-	BearerToken        string `datapolicy:"token"`
+	KubeConfig             string
+	KubeContext            string
+	KubeAPIContentType     string
+	KubeletRootDir         string
+	KubeletConfigDropinDir string
+	CertDir                string
+	Host                   string
+	BearerToken            string `datapolicy:"token"`
 	// TODO: Deprecating this over time... instead just use gobindata_util.go , see #23987.
 	RepoRoot string
 	// ListImages will list off all images that are used then quit
@@ -464,10 +465,10 @@ func RegisterClusterFlags(flags *flag.FlagSet) {
 	flags.DurationVar(&nodeKiller.SimulatedDowntime, "node-killer-simulated-downtime", 10*time.Minute, "A delay between node death and recreation")
 }
 
-// GenerateSecureToken returns a string of length tokenLen, consisting
+// generateSecureToken returns a string of length tokenLen, consisting
 // of random bytes encoded as base64 for use as a Bearer Token during
 // communication with an APIServer
-func GenerateSecureToken(tokenLen int) (string, error) {
+func generateSecureToken(tokenLen int) (string, error) {
 	// Number of bytes to be tokenLen when base64 encoded.
 	tokenSize := math.Ceil(float64(tokenLen) * 6 / 8)
 	rawToken := make([]byte, int(tokenSize))
@@ -491,13 +492,6 @@ func AfterReadingAllFlags(t *TestContextType) {
 	if t.KubeTestRepoList != "" {
 		image.Init(t.KubeTestRepoList)
 	}
-	var fs flag.FlagSet
-	klog.InitFlags(&fs)
-	fs.Set("logtostderr", "false")
-	fs.Set("alsologtostderr", "false")
-	fs.Set("one_output", "true")
-	fs.Set("stderrthreshold", "10" /* higher than any of the severities -> none pass the threshold */)
-	klog.SetOutput(ginkgo.GinkgoWriter)
 
 	if t.ListImages {
 		for _, v := range image.GetImageConfigs() {
@@ -517,6 +511,7 @@ func AfterReadingAllFlags(t *TestContextType) {
 
 	// ginkgo.PreviewSpecs will expand all nodes and thus may find new bugs.
 	report := ginkgo.PreviewSpecs("Kubernetes e2e test statistics")
+	validateSpecs(report.SpecReports)
 	if err := FormatBugs(); CheckForBugs && err != nil {
 		// Refuse to do anything if the E2E suite is buggy.
 		fmt.Fprint(Output, "ERROR: E2E suite initialization was faulty, these errors must be fixed:")
@@ -546,10 +541,8 @@ func AfterReadingAllFlags(t *TestContextType) {
 	}
 	if len(t.BearerToken) == 0 {
 		var err error
-		t.BearerToken, err = GenerateSecureToken(16)
-		if err != nil {
-			klog.Fatalf("Failed to generate bearer token: %v", err)
-		}
+		t.BearerToken, err = generateSecureToken(16)
+		ExpectNoError(err, "Failed to generate bearer token")
 	}
 
 	// Allow 1% of nodes to be unready (statistically) - relevant for large clusters.
@@ -645,7 +638,7 @@ func listTestInformation(report ginkgo.Report) {
 				labels.Insert(spec.Labels()...)
 			}
 		}
-		fmt.Fprintf(Output, "The following labels can be used with 'gingko run --label-filter':\n%s%s\n\n", indent, strings.Join(sets.List(labels), "\n"+indent))
+		fmt.Fprintf(Output, "The following labels can be used with 'ginkgo run --label-filter':\n%s%s\n\n", indent, strings.Join(sets.List(labels), "\n"+indent))
 	}
 	if TestContext.listTests {
 		leafs := make([][]string, 0, len(report.SpecReports))

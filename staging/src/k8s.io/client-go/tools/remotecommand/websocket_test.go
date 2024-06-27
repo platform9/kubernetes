@@ -74,7 +74,7 @@ func TestWebSocketClient_LoopbackStdinToStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestWebSocketClient_DifferentBufferSizes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 		}
-		exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+		exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 		if err != nil {
 			t.Errorf("unexpected error creating websocket executor: %v", err)
 		}
@@ -223,7 +223,7 @@ func TestWebSocketClient_LoopbackStdinAsPipe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestWebSocketClient_LoopbackStdinToStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestWebSocketClient_MultipleReadChannels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestWebSocketClient_ErrorStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestWebSocketClient_MultipleWriteChannels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestWebSocketClient_ProtocolVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -766,11 +766,14 @@ func TestWebSocketClient_ProtocolVersions(t *testing.T) {
 func TestWebSocketClient_BadHandshake(t *testing.T) {
 	// Create fake WebSocket server (supports V5 subprotocol).
 	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		conns, err := webSocketServerStreams(req, w, streamOptionsFromRequest(req))
-		if err != nil {
-			t.Fatalf("error on webSocketServerStreams: %v", err)
+		// Bad handshake means websocket server will not completely initialize.
+		_, err := webSocketServerStreams(req, w, streamOptionsFromRequest(req))
+		if err == nil {
+			t.Fatalf("expected error, but received none.")
 		}
-		defer conns.conn.Close()
+		if !strings.Contains(err.Error(), "websocket server finished before becoming ready") {
+			t.Errorf("expected websocket server error, but got: %v", err)
+		}
 	}))
 	defer websocketServer.Close()
 
@@ -779,7 +782,7 @@ func TestWebSocketClient_BadHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -814,6 +817,8 @@ func TestWebSocketClient_BadHandshake(t *testing.T) {
 // TestWebSocketClient_HeartbeatTimeout tests the heartbeat by forcing a
 // timeout by setting the ping period greater than the deadline.
 func TestWebSocketClient_HeartbeatTimeout(t *testing.T) {
+	blockRequestCtx, unblockRequest := context.WithCancel(context.Background())
+	defer unblockRequest()
 	// Create fake WebSocket server which blocks.
 	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		conns, err := webSocketServerStreams(req, w, streamOptionsFromRequest(req))
@@ -821,8 +826,7 @@ func TestWebSocketClient_HeartbeatTimeout(t *testing.T) {
 			t.Fatalf("error on webSocketServerStreams: %v", err)
 		}
 		defer conns.conn.Close()
-		// Block server; heartbeat timeout (or test timeout) will fire before this returns.
-		time.Sleep(1 * time.Second)
+		<-blockRequestCtx.Done()
 	}))
 	defer websocketServer.Close()
 	// Create websocket client connecting to fake server.
@@ -831,14 +835,14 @@ func TestWebSocketClient_HeartbeatTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
 	streamExec := exec.(*wsStreamExecutor)
 	// Ping period is greater than the ping deadline, forcing the timeout to fire.
-	pingPeriod := 20 * time.Millisecond
-	pingDeadline := 5 * time.Millisecond
+	pingPeriod := wait.ForeverTestTimeout // this lets the heartbeat deadline expire without renewing it
+	pingDeadline := time.Second           // this gives setup 1 second to establish streams
 	streamExec.heartbeatPeriod = pingPeriod
 	streamExec.heartbeatDeadline = pingDeadline
 	// Send some random data to the websocket server through STDIN.
@@ -856,8 +860,7 @@ func TestWebSocketClient_HeartbeatTimeout(t *testing.T) {
 	}()
 
 	select {
-	case <-time.After(pingPeriod * 5):
-		// Give up after about five ping attempts
+	case <-time.After(wait.ForeverTestTimeout):
 		t.Fatalf("expected heartbeat timeout, got none.")
 	case err := <-errorChan:
 		// Expecting heartbeat timeout error.
@@ -909,7 +912,7 @@ func TestWebSocketClient_TextMessageTypeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -970,7 +973,7 @@ func TestWebSocketClient_EmptyMessageHandled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to parse WebSocket server URL: %s", websocketServer.URL)
 	}
-	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "POST", websocketServer.URL)
+	exec, err := NewWebSocketExecutor(&rest.Config{Host: websocketLocation.Host}, "GET", websocketServer.URL)
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -1009,14 +1012,14 @@ func TestWebSocketClient_ExecutorErrors(t *testing.T) {
 		ExecProvider: &clientcmdapi.ExecConfig{},
 		AuthProvider: &clientcmdapi.AuthProviderConfig{},
 	}
-	_, err := NewWebSocketExecutor(&config, "POST", "http://localhost")
+	_, err := NewWebSocketExecutor(&config, "GET", "http://localhost")
 	if err == nil {
 		t.Errorf("expecting executor constructor error, but received none.")
 	} else if !strings.Contains(err.Error(), "error creating websocket transports") {
 		t.Errorf("expecting error creating transports, got (%s)", err.Error())
 	}
 	// Verify that a nil context will cause an error in StreamWithContext
-	exec, err := NewWebSocketExecutor(&rest.Config{}, "POST", "http://localhost")
+	exec, err := NewWebSocketExecutor(&rest.Config{}, "GET", "http://localhost")
 	if err != nil {
 		t.Errorf("unexpected error creating websocket executor: %v", err)
 	}
@@ -1111,6 +1114,14 @@ func TestWebSocketClient_HeartbeatSucceeds(t *testing.T) {
 		t.Errorf("unexpected heartbeat timeout")
 	}
 	wg.Wait()
+}
+
+func TestLateStreamCreation(t *testing.T) {
+	c := newWSStreamCreator(nil)
+	c.closeAllStreamReaders(nil)
+	if err := c.setStream(0, nil); err == nil {
+		t.Fatal("expected error adding stream after closeAllStreamReaders")
+	}
 }
 
 func TestWebSocketClient_StreamsAndExpectedErrors(t *testing.T) {
@@ -1316,7 +1327,16 @@ func createWebSocketStreams(req *http.Request, w http.ResponseWriter, opts *opti
 		resizeStream: streams[remotecommand.StreamResize],
 	}
 
-	wsStreams.writeStatus = v4WriteStatusFunc(streams[remotecommand.StreamErr])
+	wsStreams.writeStatus = func(stream io.Writer) func(status *apierrors.StatusError) error {
+		return func(status *apierrors.StatusError) error {
+			bs, err := json.Marshal(status.Status())
+			if err != nil {
+				return err
+			}
+			_, err = stream.Write(bs)
+			return err
+		}
+	}(streams[remotecommand.StreamErr])
 
 	return wsStreams, nil
 }

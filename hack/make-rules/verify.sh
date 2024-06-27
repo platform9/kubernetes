@@ -43,7 +43,6 @@ EXCLUDED_PATTERNS=(
 if [[ ${EXCLUDE_TYPECHECK:-} =~ ^[yY]$ ]]; then
   EXCLUDED_PATTERNS+=(
     "verify-typecheck.sh"              # runs in separate typecheck job
-    "verify-typecheck-providerless.sh" # runs in separate typecheck job
     )
 fi
 
@@ -55,6 +54,13 @@ if [[ ${EXCLUDE_GODEP:-} =~ ^[yY]$ ]]; then
     "verify-external-dependencies-version.sh" # runs in separate dependencies job
     "verify-vendor.sh"                        # runs in separate dependencies job
     "verify-vendor-licenses.sh"               # runs in separate dependencies job
+    )
+fi
+
+# Exclude golangci-lint if requested, for example in pull-kubernetes-verify.
+if [[ ${EXCLUDE_GOLANGCI_LINT:-} =~ ^[yY]$ ]]; then
+  EXCLUDED_PATTERNS+=(
+    "verify-golangci-lint.sh"              # runs in separate pull-kubernetes-verify-lint
     )
 fi
 
@@ -71,7 +77,7 @@ QUICK_PATTERNS+=(
   "verify-api-groups.sh"
   "verify-boilerplate.sh"
   "verify-external-dependencies-version.sh"
-  "verify-vendor-licenses.sh"
+  "verify-fieldname-docs.sh"
   "verify-gofmt.sh"
   "verify-imports.sh"
   "verify-non-mutating-validation.sh"
@@ -82,6 +88,7 @@ QUICK_PATTERNS+=(
   "verify-staging-meta-files.sh"
   "verify-test-featuregates.sh"
   "verify-test-images.sh"
+  "verify-vendor-licenses.sh"
 )
 
 while IFS='' read -r line; do EXCLUDED_CHECKS+=("$line"); done < <(ls "${EXCLUDED_PATTERNS[@]/#/${KUBE_ROOT}/hack/}" 2>/dev/null || true)
@@ -113,7 +120,7 @@ function is-explicitly-chosen {
   index=0
   for e in "${TARGET_LIST[@]}"; do
     if [[ "${e}" == "${name}" ]]; then
-      TARGET_LIST[${index}]=""
+      TARGET_LIST[index]=""
       return
     fi
     index=$((index + 1))

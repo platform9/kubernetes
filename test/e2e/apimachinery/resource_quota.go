@@ -38,7 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
-	watch "k8s.io/apimachinery/pkg/watch"
+	"k8s.io/apimachinery/pkg/watch"
 	quota "k8s.io/apiserver/pkg/quota/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	clientscheme "k8s.io/client-go/kubernetes/scheme"
@@ -46,6 +46,7 @@ import (
 	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/kubernetes/pkg/quota/v1/evaluator/core"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/utils/crd"
 	imageutils "k8s.io/kubernetes/test/utils/image"
@@ -164,7 +165,7 @@ var _ = SIGDescribe("ResourceQuota", func() {
 		found, unchanged := 0, 0
 		// On contended servers the service account controller can slow down, leading to the count changing during a run.
 		// Wait up to 5s for the count to stabilize, assuming that updates come at a consistent rate, and are not held indefinitely.
-		err := wait.PollWithContext(ctx, 1*time.Second, 30*time.Second, func(ctx context.Context) (bool, error) {
+		err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, false, func(ctx context.Context) (bool, error) {
 			secrets, err := f.ClientSet.CoreV1().Secrets(f.Namespace.Name).List(ctx, metav1.ListOptions{})
 			framework.ExpectNoError(err)
 			if len(secrets.Items) == found {
@@ -330,7 +331,7 @@ var _ = SIGDescribe("ResourceQuota", func() {
 		found, unchanged := 0, 0
 		// On contended servers the service account controller can slow down, leading to the count changing during a run.
 		// Wait up to 15s for the count to stabilize, assuming that updates come at a consistent rate, and are not held indefinitely.
-		err := wait.PollWithContext(ctx, 1*time.Second, time.Minute, func(ctx context.Context) (bool, error) {
+		err := wait.PollUntilContextTimeout(ctx, 1*time.Second, time.Minute, false, func(ctx context.Context) (bool, error) {
 			configmaps, err := f.ClientSet.CoreV1().ConfigMaps(f.Namespace.Name).List(ctx, metav1.ListOptions{})
 			framework.ExpectNoError(err)
 			if len(configmaps.Items) == found {
@@ -1185,25 +1186,40 @@ var _ = SIGDescribe("ResourceQuota", func() {
 		})
 		framework.ExpectNoError(err, "failed to locate ResourceQuota %q in namespace %q", patchedResourceQuota.Name, ns)
 
-		err = wait.PollImmediateWithContext(ctx, 5*time.Second, 5*time.Minute, func(ctx context.Context) (bool, error) {
+		// the resource_quota_controller ignores changes to the status so we have to wait for a full resync of the controller
+		// to reconcile the status again, this full resync is set every 5 minutes by default so we need to poll at least one
+		// minute more just in case we we start to poll just after the full resync has happened and he have to wait until
+		// next full resync.
+		// Ref: https://issues.k8s.io/121911
+		err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 6*time.Minute, true, func(ctx context.Context) (bool, error) {
 			resourceQuotaResult, err := rqClient.Get(ctx, rqName, metav1.GetOptions{})
-			framework.ExpectNoError(err)
-
-			if apiequality.Semantic.DeepEqual(resourceQuotaResult.Spec.Hard.Cpu(), resourceQuotaResult.Status.Hard.Cpu()) {
-				gomega.Expect(*resourceQuotaResult.Status.Hard.Cpu()).To(gomega.Equal(resource.MustParse("1")), "Hard cpu value for ResourceQuota %q is %s not 1.", repatchedResourceQuota.Name, repatchedResourceQuota.Status.Hard.Cpu().String())
-				gomega.Expect(*resourceQuotaResult.Status.Hard.Memory()).To(gomega.Equal(resource.MustParse("1Gi")), "Hard memory value for ResourceQuota %q is %s not 1Gi.", repatchedResourceQuota.Name, repatchedResourceQuota.Status.Hard.Memory().String())
-				framework.Logf("ResourceQuota %q Spec was unchanged and /status reset", resourceQuotaResult.Name)
-
-				return true, nil
+			if err != nil {
+				return false, nil
 			}
 
+			if *resourceQuotaResult.Spec.Hard.Cpu() == *resourceQuotaResult.Status.Hard.Cpu() {
+				if *resourceQuotaResult.Status.Hard.Cpu() != resource.MustParse("1") {
+					framework.Logf("Hard cpu status value for ResourceQuota %q is %s not 1.", repatchedResourceQuota.Name, resourceQuotaResult.Status.Hard.Cpu().String())
+					return false, nil
+				}
+				if *resourceQuotaResult.Status.Hard.Memory() != resource.MustParse("1Gi") {
+					framework.Logf("Hard memory status value for ResourceQuota %q is %s not 1Gi.", repatchedResourceQuota.Name, resourceQuotaResult.Status.Hard.Memory().String())
+					return false, nil
+				}
+				framework.Logf("ResourceQuota %q Spec was unchanged and /status reset", resourceQuotaResult.Name)
+				return true, nil
+			}
+			framework.Logf("ResourceQuota %q Spec and Status does not match: %#v", resourceQuotaResult.Name, resourceQuotaResult)
 			return false, nil
 		})
-		framework.ExpectNoError(err)
+		if err != nil {
+			framework.Failf("Error waiting for ResourceQuota %q to reset its Status: %v", patchedResourceQuota.Name, err)
+		}
+
 	})
 })
 
-var _ = SIGDescribe("ResourceQuota [Feature:ScopeSelectors]", func() {
+var _ = SIGDescribe("ResourceQuota", func() {
 	f := framework.NewDefaultFramework("scope-selectors")
 	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 	ginkgo.It("should verify ResourceQuota with best effort scope using scope-selectors.", func(ctx context.Context) {
@@ -1384,7 +1400,7 @@ var _ = SIGDescribe("ResourceQuota [Feature:ScopeSelectors]", func() {
 	})
 })
 
-var _ = SIGDescribe("ResourceQuota [Feature:PodPriority]", func() {
+var _ = SIGDescribe("ResourceQuota", feature.PodPriority, func() {
 	f := framework.NewDefaultFramework("resourcequota-priorityclass")
 	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
@@ -2105,7 +2121,7 @@ func deleteResourceQuota(ctx context.Context, c clientset.Interface, namespace, 
 // Wait up to 5s for the count to stabilize, assuming that updates come at a consistent rate, and are not held indefinitely.
 func countResourceQuota(ctx context.Context, c clientset.Interface, namespace string) (int, error) {
 	found, unchanged := 0, 0
-	return found, wait.PollWithContext(ctx, 1*time.Second, 30*time.Second, func(ctx context.Context) (bool, error) {
+	return found, wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, false, func(ctx context.Context) (bool, error) {
 		resourceQuotas, err := c.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
 		framework.ExpectNoError(err)
 		if len(resourceQuotas.Items) == found {
@@ -2121,7 +2137,7 @@ func countResourceQuota(ctx context.Context, c clientset.Interface, namespace st
 
 // wait for resource quota status to show the expected used resources value
 func waitForResourceQuota(ctx context.Context, c clientset.Interface, ns, quotaName string, used v1.ResourceList) error {
-	return wait.PollWithContext(ctx, framework.Poll, resourceQuotaTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, resourceQuotaTimeout, false, func(ctx context.Context) (bool, error) {
 		resourceQuota, err := c.CoreV1().ResourceQuotas(ns).Get(ctx, quotaName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -2144,7 +2160,7 @@ func waitForResourceQuota(ctx context.Context, c clientset.Interface, ns, quotaN
 // updateResourceQuotaUntilUsageAppears updates the resource quota object until the usage is populated
 // for the specific resource name.
 func updateResourceQuotaUntilUsageAppears(ctx context.Context, c clientset.Interface, ns, quotaName string, resourceName v1.ResourceName) error {
-	return wait.PollWithContext(ctx, framework.Poll, resourceQuotaTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, resourceQuotaTimeout, false, func(ctx context.Context) (bool, error) {
 		resourceQuota, err := c.CoreV1().ResourceQuotas(ns).Get(ctx, quotaName, metav1.GetOptions{})
 		if err != nil {
 			return false, err

@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 /*
 Copyright 2015 The Kubernetes Authors.
 
@@ -40,240 +43,24 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/metrics/testutil"
 	"k8s.io/klog/v2"
+	klogtesting "k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/proxy"
+	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
 	"k8s.io/kubernetes/pkg/proxy/conntrack"
-	"k8s.io/kubernetes/pkg/proxy/metrics"
-
 	"k8s.io/kubernetes/pkg/proxy/healthcheck"
+	"k8s.io/kubernetes/pkg/proxy/metrics"
 	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
-	proxyutiliptables "k8s.io/kubernetes/pkg/proxy/util/iptables"
 	proxyutiltest "k8s.io/kubernetes/pkg/proxy/util/testing"
 	"k8s.io/kubernetes/pkg/util/async"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 	iptablestest "k8s.io/kubernetes/pkg/util/iptables/testing"
-	"k8s.io/utils/exec"
-	fakeexec "k8s.io/utils/exec/testing"
 	netutils "k8s.io/utils/net"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
-
-// (Note that we don't use UDP ports in most of the tests here, because if you create UDP
-// services you have to deal with setting up the FakeExec correctly for the conntrack
-// cleanup calls.)
-var tcpProtocol = v1.ProtocolTCP
-var sctpProtocol = v1.ProtocolSCTP
-
-func TestDeleteEndpointConnections(t *testing.T) {
-	const (
-		UDP  = v1.ProtocolUDP
-		TCP  = v1.ProtocolTCP
-		SCTP = v1.ProtocolSCTP
-	)
-
-	testCases := []struct {
-		description  string
-		svcName      string
-		svcIP        string
-		svcPort      int32
-		protocol     v1.Protocol
-		endpoint     string // IP:port endpoint
-		simulatedErr string
-	}{
-		{
-			description: "V4 UDP",
-			svcName:     "v4-udp",
-			svcIP:       "172.30.1.1",
-			svcPort:     80,
-			protocol:    UDP,
-			endpoint:    "10.240.0.3:80",
-		},
-		{
-			description: "V4 TCP",
-			svcName:     "v4-tcp",
-			svcIP:       "172.30.2.2",
-			svcPort:     80,
-			protocol:    TCP,
-			endpoint:    "10.240.0.4:80",
-		},
-		{
-			description: "V4 SCTP",
-			svcName:     "v4-sctp",
-			svcIP:       "172.30.3.3",
-			svcPort:     80,
-			protocol:    SCTP,
-			endpoint:    "10.240.0.5:80",
-		},
-		{
-			description:  "V4 UDP, nothing to delete, benign error",
-			svcName:      "v4-udp-nothing-to-delete",
-			svcIP:        "172.30.4.4",
-			svcPort:      80,
-			protocol:     UDP,
-			endpoint:     "10.240.0.6:80",
-			simulatedErr: conntrack.NoConnectionToDelete,
-		},
-		{
-			description:  "V4 UDP, unexpected error, should be glogged",
-			svcName:      "v4-udp-simulated-error",
-			svcIP:        "172.30.5.5",
-			svcPort:      80,
-			protocol:     UDP,
-			endpoint:     "10.240.0.7:80",
-			simulatedErr: "simulated error",
-		},
-		{
-			description: "V6 UDP",
-			svcName:     "v6-udp",
-			svcIP:       "fd00:1234::20",
-			svcPort:     80,
-			protocol:    UDP,
-			endpoint:    "[2001:db8::2]:80",
-		},
-		{
-			description: "V6 TCP",
-			svcName:     "v6-tcp",
-			svcIP:       "fd00:1234::30",
-			svcPort:     80,
-			protocol:    TCP,
-			endpoint:    "[2001:db8::3]:80",
-		},
-		{
-			description: "V6 SCTP",
-			svcName:     "v6-sctp",
-			svcIP:       "fd00:1234::40",
-			svcPort:     80,
-			protocol:    SCTP,
-			endpoint:    "[2001:db8::4]:80",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
-			priorGlogErrs := klog.Stats.Error.Lines()
-
-			// Create a fake executor for the conntrack utility.
-			fcmd := fakeexec.FakeCmd{}
-			fexec := &fakeexec.FakeExec{
-				LookPathFunc: func(cmd string) (string, error) { return cmd, nil },
-			}
-			execFunc := func(cmd string, args ...string) exec.Cmd {
-				return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
-			}
-
-			if tc.protocol == UDP {
-				cmdOutput := "1 flow entries have been deleted"
-				var simErr error
-
-				// First call outputs cmdOutput and succeeds
-				fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript,
-					func() ([]byte, []byte, error) { return []byte(cmdOutput), nil, nil },
-				)
-				fexec.CommandScript = append(fexec.CommandScript, execFunc)
-
-				// Second call may succeed or fail
-				if tc.simulatedErr != "" {
-					cmdOutput = ""
-					simErr = fmt.Errorf(tc.simulatedErr)
-				}
-				fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript,
-					func() ([]byte, []byte, error) { return []byte(cmdOutput), nil, simErr },
-				)
-				fexec.CommandScript = append(fexec.CommandScript, execFunc)
-			}
-
-			endpointIP := proxyutil.IPPart(tc.endpoint)
-			isIPv6 := netutils.IsIPv6String(endpointIP)
-
-			var ipt utiliptables.Interface
-			if isIPv6 {
-				ipt = iptablestest.NewIPv6Fake()
-			} else {
-				ipt = iptablestest.NewFake()
-			}
-			fp := NewFakeProxier(ipt)
-			fp.exec = fexec
-
-			makeServiceMap(fp,
-				makeTestService("ns1", tc.svcName, func(svc *v1.Service) {
-					svc.Spec.ClusterIP = tc.svcIP
-					svc.Spec.Ports = []v1.ServicePort{{
-						Name:     "p80",
-						Port:     tc.svcPort,
-						Protocol: tc.protocol,
-					}}
-					svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyLocal
-				}),
-			)
-			fp.svcPortMap.Update(fp.serviceChanges)
-
-			slice := makeTestEndpointSlice("ns1", tc.svcName, 1, func(eps *discovery.EndpointSlice) {
-				if isIPv6 {
-					eps.AddressType = discovery.AddressTypeIPv6
-				} else {
-					eps.AddressType = discovery.AddressTypeIPv4
-				}
-				eps.Endpoints = []discovery.Endpoint{{
-					Addresses: []string{endpointIP},
-				}}
-				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p80"),
-					Port:     pointer.Int32(80),
-					Protocol: &tc.protocol,
-				}}
-			})
-
-			// Add and then remove the endpoint slice
-			fp.OnEndpointSliceAdd(slice)
-			fp.syncProxyRules()
-			fp.OnEndpointSliceDelete(slice)
-			fp.syncProxyRules()
-
-			// Check the executed conntrack command
-			if tc.protocol == UDP {
-				if fexec.CommandCalls != 2 {
-					t.Fatalf("Expected conntrack to be executed 2 times, but got %d", fexec.CommandCalls)
-				}
-
-				// First clear conntrack entries for the clusterIP when the
-				// endpoint is first added.
-				expectCommand := fmt.Sprintf("conntrack -D --orig-dst %s -p udp", tc.svcIP)
-				if isIPv6 {
-					expectCommand += " -f ipv6"
-				}
-				actualCommand := strings.Join(fcmd.CombinedOutputLog[0], " ")
-				if actualCommand != expectCommand {
-					t.Errorf("Expected command: %s, but executed %s", expectCommand, actualCommand)
-				}
-
-				// Then clear conntrack entries for the endpoint when it is
-				// deleted.
-				expectCommand = fmt.Sprintf("conntrack -D --orig-dst %s --dst-nat %s -p udp", tc.svcIP, endpointIP)
-				if isIPv6 {
-					expectCommand += " -f ipv6"
-				}
-				actualCommand = strings.Join(fcmd.CombinedOutputLog[1], " ")
-				if actualCommand != expectCommand {
-					t.Errorf("Expected command: %s, but executed %s", expectCommand, actualCommand)
-				}
-			} else if fexec.CommandCalls != 0 {
-				t.Fatalf("Expected conntrack to be executed 0 times, but got %d", fexec.CommandCalls)
-			}
-
-			// Check the number of new glog errors
-			var expGlogErrs int64
-			if tc.simulatedErr != "" && tc.simulatedErr != conntrack.NoConnectionToDelete {
-				expGlogErrs = 1
-			}
-			glogErrs := klog.Stats.Error.Lines() - priorGlogErrs
-			if glogErrs != expGlogErrs {
-				t.Errorf("Expected %d glogged errors, but got %d", expGlogErrs, glogErrs)
-			}
-		})
-	}
-}
 
 // Conventions for tests using NewFakeProxier:
 //
@@ -306,7 +93,7 @@ func NewFakeProxier(ipt utiliptables.Interface) *Proxier {
 		ipfamily = v1.IPv6Protocol
 		podCIDR = "fd00:10::/64"
 	}
-	detectLocal, _ := proxyutiliptables.NewDetectLocalByCIDR(podCIDR)
+	detectLocal := proxyutil.NewDetectLocalByCIDR(podCIDR)
 
 	networkInterfacer := proxyutiltest.NewFakeNetwork()
 	itf := net.Interface{Index: 0, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0}
@@ -326,7 +113,7 @@ func NewFakeProxier(ipt utiliptables.Interface) *Proxier {
 	networkInterfacer.AddInterfaceAddr(&itf1, addrs1)
 
 	p := &Proxier{
-		exec:                     &fakeexec.FakeExec{},
+		ipFamily:                 ipfamily,
 		svcPortMap:               make(proxy.ServicePortMap),
 		serviceChanges:           proxy.NewServiceChangeTracker(newServiceInfo, ipfamily, nil, nil),
 		endpointsMap:             make(proxy.EndpointsMap),
@@ -334,6 +121,7 @@ func NewFakeProxier(ipt utiliptables.Interface) *Proxier {
 		needFullSync:             true,
 		iptables:                 ipt,
 		masqueradeMark:           "0x4000",
+		conntrack:                conntrack.NewFake(),
 		localDetector:            detectLocal,
 		hostname:                 testHostname,
 		serviceHealthServer:      healthcheck.NewFakeServiceHealthServer(),
@@ -348,6 +136,10 @@ func NewFakeProxier(ipt utiliptables.Interface) *Proxier {
 		localhostNodePorts:       true,
 		nodePortAddresses:        proxyutil.NewNodePortAddresses(ipfamily, nil),
 		networkInterfacer:        networkInterfacer,
+		nfAcctCounters: map[string]bool{
+			metrics.IPTablesCTStateInvalidDroppedNFAcctCounter: true,
+			metrics.LocalhostNodePortAcceptedNFAcctCounter:     true,
+		},
 	}
 	p.setInitialized(true)
 	p.syncRunner = async.NewBoundedFrequencyRunner("test-sync-runner", p.syncProxyRules, 0, time.Minute, 1)
@@ -600,17 +392,17 @@ func TestParseIPTablesData(t *testing.T) {
 	}
 }
 
-func countRules(tableName utiliptables.Table, ruleData string) int {
+func countRules(logger klog.Logger, tableName utiliptables.Table, ruleData string) int {
 	dump, err := iptablestest.ParseIPTablesDump(ruleData)
 	if err != nil {
-		klog.ErrorS(err, "error parsing iptables rules")
+		logger.Error(err, "error parsing iptables rules")
 		return -1
 	}
 
 	rules := 0
 	table, err := dump.GetTable(tableName)
 	if err != nil {
-		klog.ErrorS(err, "can't find table", "table", tableName)
+		logger.Error(err, "can't find table", "table", tableName)
 		return -1
 	}
 
@@ -620,19 +412,19 @@ func countRules(tableName utiliptables.Table, ruleData string) int {
 	return rules
 }
 
-func countRulesFromMetric(tableName utiliptables.Table) int {
-	numRulesFloat, err := testutil.GetGaugeMetricValue(metrics.IptablesRulesTotal.WithLabelValues(string(tableName)))
+func countRulesFromMetric(logger klog.Logger, tableName utiliptables.Table) int {
+	numRulesFloat, err := testutil.GetGaugeMetricValue(metrics.IPTablesRulesTotal.WithLabelValues(string(tableName)))
 	if err != nil {
-		klog.ErrorS(err, "metrics are not registered?")
+		logger.Error(err, "metrics are not registered?")
 		return -1
 	}
 	return int(numRulesFloat)
 }
 
-func countRulesFromLastSyncMetric(tableName utiliptables.Table) int {
-	numRulesFloat, err := testutil.GetGaugeMetricValue(metrics.IptablesRulesLastSync.WithLabelValues(string(tableName)))
+func countRulesFromLastSyncMetric(logger klog.Logger, tableName utiliptables.Table) int {
+	numRulesFloat, err := testutil.GetGaugeMetricValue(metrics.IPTablesRulesLastSync.WithLabelValues(string(tableName)))
 	if err != nil {
-		klog.ErrorS(err, "metrics are not registered?")
+		logger.Error(err, "metrics are not registered?")
 		return -1
 	}
 	return int(numRulesFloat)
@@ -1577,9 +1369,9 @@ func runPacketFlowTests(t *testing.T, line int, ipt *iptablestest.FakeIPTables, 
 	}
 }
 
-// This tests tracePackets against static data, just to make sure we match things in the
+// This tests tracePacket against static data, just to make sure we match things in the
 // way we expect to.
-func TestTracePackets(t *testing.T) {
+func TestTracePacket(t *testing.T) {
 	rules := dedent.Dedent(`
 		*filter
 		:INPUT - [0:0]
@@ -1753,9 +1545,10 @@ func TestTracePackets(t *testing.T) {
 // TestOverallIPTablesRules creates a variety of services and verifies that the generated
 // rules are exactly as expected.
 func TestOverallIPTablesRules(t *testing.T) {
+	logger, _ := klogtesting.NewTestContext(t)
 	ipt := iptablestest.NewFake()
 	fp := NewFakeProxier(ipt)
-	metrics.RegisterMetrics()
+	metrics.RegisterMetrics(kubeproxyconfig.ProxyModeIPTables)
 
 	makeServiceMap(fp,
 		// create ClusterIP service
@@ -1827,10 +1620,11 @@ func TestOverallIPTablesRules(t *testing.T) {
 			// in a crash, for backward compatibility.
 			svc.Spec.LoadBalancerSourceRanges = []string{" 203.0.113.0/25"}
 
-			svcSessionAffinityTimeout := int32(10800)
 			svc.Spec.SessionAffinity = v1.ServiceAffinityClientIP
 			svc.Spec.SessionAffinityConfig = &v1.SessionAffinityConfig{
-				ClientIP: &v1.ClientIPConfig{TimeoutSeconds: &svcSessionAffinityTimeout},
+				ClientIP: &v1.ClientIPConfig{
+					TimeoutSeconds: ptr.To[int32](10800),
+				},
 			}
 		}),
 		// create ClusterIP service with no endpoints
@@ -1853,9 +1647,9 @@ func TestOverallIPTablesRules(t *testing.T) {
 				Addresses: []string{"10.180.0.1"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		// create Local LoadBalancer endpoints. Note that since we aren't setting
@@ -1866,9 +1660,9 @@ func TestOverallIPTablesRules(t *testing.T) {
 				Addresses: []string{"10.180.0.2"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		// create NodePort service endpoints
@@ -1878,9 +1672,9 @@ func TestOverallIPTablesRules(t *testing.T) {
 				Addresses: []string{"10.180.0.3"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		// create ExternalIP service endpoints
@@ -1890,12 +1684,12 @@ func TestOverallIPTablesRules(t *testing.T) {
 				Addresses: []string{"10.180.0.4"},
 			}, {
 				Addresses: []string{"10.180.0.5"},
-				NodeName:  pointer.String(testHostname),
+				NodeName:  ptr.To(testHostname),
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		// create Cluster LoadBalancer endpoints
@@ -1905,9 +1699,9 @@ func TestOverallIPTablesRules(t *testing.T) {
 				Addresses: []string{"10.180.0.3"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -1928,7 +1722,7 @@ func TestOverallIPTablesRules(t *testing.T) {
 		-A KUBE-EXTERNAL-SERVICES -m comment --comment "ns2/svc2:p80 has no local endpoints" -m tcp -p tcp -d 1.2.3.4 --dport 80 -j DROP
 		-A KUBE-EXTERNAL-SERVICES -m comment --comment "ns2/svc2:p80 has no local endpoints" -m addrtype --dst-type LOCAL -m tcp -p tcp --dport 3001 -j DROP
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		-A KUBE-PROXY-FIREWALL -m comment --comment "ns5/svc5:p80 traffic not accepted by KUBE-FW-NUKIZ6OKUXPJNT4C" -m tcp -p tcp -d 5.6.7.8 --dport 80 -j DROP
@@ -1954,8 +1748,11 @@ func TestOverallIPTablesRules(t *testing.T) {
 		:KUBE-SVC-NUKIZ6OKUXPJNT4C - [0:0]
 		:KUBE-SVC-X27LE4BHSL4DOUIK - [0:0]
 		:KUBE-SVC-XPGD46QRK7WJZT7O - [0:0]
+		-A KUBE-NODEPORTS -m comment --comment ns2/svc2:p80 -m tcp -p tcp -d 127.0.0.0/8 --dport 3001 -m nfacct --nfacct-name localhost_nps_accepted_pkts -j KUBE-EXT-GNZBNJ2PO5MGZ6GT
 		-A KUBE-NODEPORTS -m comment --comment ns2/svc2:p80 -m tcp -p tcp --dport 3001 -j KUBE-EXT-GNZBNJ2PO5MGZ6GT
+		-A KUBE-NODEPORTS -m comment --comment ns3/svc3:p80 -m tcp -p tcp -d 127.0.0.0/8 --dport 3003 -m nfacct --nfacct-name localhost_nps_accepted_pkts -j KUBE-EXT-X27LE4BHSL4DOUIK
 		-A KUBE-NODEPORTS -m comment --comment ns3/svc3:p80 -m tcp -p tcp --dport 3003 -j KUBE-EXT-X27LE4BHSL4DOUIK
+		-A KUBE-NODEPORTS -m comment --comment ns5/svc5:p80 -m tcp -p tcp -d 127.0.0.0/8 --dport 3002 -m nfacct --nfacct-name localhost_nps_accepted_pkts -j KUBE-EXT-NUKIZ6OKUXPJNT4C
 		-A KUBE-NODEPORTS -m comment --comment ns5/svc5:p80 -m tcp -p tcp --dport 3002 -j KUBE-EXT-NUKIZ6OKUXPJNT4C
 		-A KUBE-SERVICES -m comment --comment "ns1/svc1:p80 cluster IP" -m tcp -p tcp -d 172.30.0.41 --dport 80 -j KUBE-SVC-XPGD46QRK7WJZT7O
 		-A KUBE-SERVICES -m comment --comment "ns2/svc2:p80 cluster IP" -m tcp -p tcp -d 172.30.0.42 --dport 80 -j KUBE-SVC-GNZBNJ2PO5MGZ6GT
@@ -2011,8 +1808,8 @@ func TestOverallIPTablesRules(t *testing.T) {
 
 	assertIPTablesRulesEqual(t, getLine(), true, expected, fp.iptablesData.String())
 
-	nNatRules := countRulesFromMetric(utiliptables.TableNAT)
-	expectedNatRules := countRules(utiliptables.TableNAT, fp.iptablesData.String())
+	nNatRules := countRulesFromMetric(logger, utiliptables.TableNAT)
+	expectedNatRules := countRules(logger, utiliptables.TableNAT, fp.iptablesData.String())
 
 	if nNatRules != expectedNatRules {
 		t.Fatalf("Wrong number of nat rules: expected %d received %d", expectedNatRules, nNatRules)
@@ -2127,21 +1924,22 @@ func TestClusterIPGeneral(t *testing.T) {
 					TargetPort: intstr.FromInt32(8443),
 				},
 				{
-					// Of course this should really be UDP, but if we
-					// create a service with UDP ports, the Proxier will
-					// try to do conntrack cleanup and we'd have to set
-					// the FakeExec up to be able to deal with that...
-					Name:     "dns-sctp",
+					Name:     "dns-udp",
 					Port:     53,
-					Protocol: v1.ProtocolSCTP,
+					Protocol: v1.ProtocolUDP,
 				},
 				{
 					Name:     "dns-tcp",
 					Port:     53,
 					Protocol: v1.ProtocolTCP,
-					// We use TargetPort on TCP but not SCTP to help
-					// disambiguate the output.
+					// We use TargetPort on TCP but not UDP/SCTP to
+					// help disambiguate the output.
 					TargetPort: intstr.FromInt32(5353),
+				},
+				{
+					Name:     "dns-sctp",
+					Port:     53,
+					Protocol: v1.ProtocolSCTP,
 				},
 			}
 		}),
@@ -2152,12 +1950,12 @@ func TestClusterIPGeneral(t *testing.T) {
 			eps.AddressType = discovery.AddressTypeIPv4
 			eps.Endpoints = []discovery.Endpoint{{
 				Addresses: []string{"10.180.0.1"},
-				NodeName:  pointer.String(testHostname),
+				NodeName:  ptr.To(testHostname),
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("http"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("http"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		makeTestEndpointSlice("ns2", "svc2", 1, func(eps *discovery.EndpointSlice) {
@@ -2165,33 +1963,38 @@ func TestClusterIPGeneral(t *testing.T) {
 			eps.Endpoints = []discovery.Endpoint{
 				{
 					Addresses: []string{"10.180.0.1"},
-					NodeName:  pointer.String(testHostname),
+					NodeName:  ptr.To(testHostname),
 				},
 				{
 					Addresses: []string{"10.180.2.1"},
-					NodeName:  pointer.String("host2"),
+					NodeName:  ptr.To("host2"),
 				},
 			}
 			eps.Ports = []discovery.EndpointPort{
 				{
-					Name:     pointer.String("http"),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("http"),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				},
 				{
-					Name:     pointer.String("https"),
-					Port:     pointer.Int32(8443),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("https"),
+					Port:     ptr.To[int32](8443),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				},
 				{
-					Name:     pointer.String("dns-sctp"),
-					Port:     pointer.Int32(53),
-					Protocol: &sctpProtocol,
+					Name:     ptr.To("dns-udp"),
+					Port:     ptr.To[int32](53),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				},
 				{
-					Name:     pointer.String("dns-tcp"),
-					Port:     pointer.Int32(5353),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("dns-tcp"),
+					Port:     ptr.To[int32](5353),
+					Protocol: ptr.To(v1.ProtocolTCP),
+				},
+				{
+					Name:     ptr.To("dns-sctp"),
+					Port:     ptr.To[int32](53),
+					Protocol: ptr.To(v1.ProtocolSCTP),
 				},
 			}
 		}),
@@ -2233,7 +2036,7 @@ func TestClusterIPGeneral(t *testing.T) {
 			masq:     false,
 		},
 		{
-			name:     "clusterIP with TCP and SCTP on same port (TCP)",
+			name:     "clusterIP with TCP, UDP, and SCTP on same port (TCP)",
 			sourceIP: "10.180.0.2",
 			protocol: v1.ProtocolTCP,
 			destIP:   "172.30.0.42",
@@ -2242,7 +2045,16 @@ func TestClusterIPGeneral(t *testing.T) {
 			masq:     false,
 		},
 		{
-			name:     "clusterIP with TCP and SCTP on same port (SCTP)",
+			name:     "clusterIP with TCP, UDP, and SCTP on same port (UDP)",
+			sourceIP: "10.180.0.2",
+			protocol: v1.ProtocolUDP,
+			destIP:   "172.30.0.42",
+			destPort: 53,
+			output:   "10.180.0.1:53, 10.180.2.1:53",
+			masq:     false,
+		},
+		{
+			name:     "clusterIP with TCP, UDP, and SCTP on same port (SCTP)",
 			sourceIP: "10.180.0.2",
 			protocol: v1.ProtocolSCTP,
 			destIP:   "172.30.0.42",
@@ -2313,9 +2125,9 @@ func TestLoadBalancer(t *testing.T) {
 				Addresses: []string{epIP},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -2567,12 +2379,12 @@ func TestNodePorts(t *testing.T) {
 						NodeName:  nil,
 					}, {
 						Addresses: []string{epIP2},
-						NodeName:  pointer.String(testHostname),
+						NodeName:  ptr.To(testHostname),
 					}}
 					eps.Ports = []discovery.EndpointPort{{
-						Name:     pointer.String("p80"),
-						Port:     pointer.Int32(80),
-						Protocol: &tcpProtocol,
+						Name:     ptr.To("p80"),
+						Port:     ptr.To[int32](80),
+						Protocol: ptr.To(v1.ProtocolTCP),
 					}}
 				}),
 			)
@@ -2740,22 +2552,47 @@ func TestHealthCheckNodePort(t *testing.T) {
 }
 
 func TestDropInvalidRule(t *testing.T) {
-	for _, tcpLiberal := range []bool{false, true} {
-		t.Run(fmt.Sprintf("tcpLiberal %t", tcpLiberal), func(t *testing.T) {
-			ipt := iptablestest.NewFake()
-			fp := NewFakeProxier(ipt)
-			fp.conntrackTCPLiberal = tcpLiberal
-			fp.syncProxyRules()
-
-			var expected string
-			if !tcpLiberal {
-				expected = "-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP"
-			}
-			expected += dedent.Dedent(`
+	kubeForwardChainRules := dedent.Dedent(`
 				-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 				-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-				`)
+	`)
 
+	testCases := []struct {
+		nfacctEnsured  bool
+		tcpLiberal     bool
+		dropRule       string
+		nfAcctCounters map[string]bool
+	}{
+		{
+			nfacctEnsured:  false,
+			tcpLiberal:     false,
+			nfAcctCounters: map[string]bool{},
+			dropRule:       "-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP",
+		},
+		{
+			nfacctEnsured: true,
+			tcpLiberal:    false,
+			nfAcctCounters: map[string]bool{
+				metrics.IPTablesCTStateInvalidDroppedNFAcctCounter: true,
+			},
+			dropRule: fmt.Sprintf("-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name %s -j DROP", metrics.IPTablesCTStateInvalidDroppedNFAcctCounter),
+		},
+		{
+			nfacctEnsured:  false,
+			tcpLiberal:     true,
+			nfAcctCounters: map[string]bool{},
+			dropRule:       "",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("tcpLiberal is %t and nfacctEnsured is %t", tc.tcpLiberal, tc.nfacctEnsured), func(t *testing.T) {
+			ipt := iptablestest.NewFake()
+			fp := NewFakeProxier(ipt)
+			fp.conntrackTCPLiberal = tc.tcpLiberal
+			fp.nfAcctCounters = tc.nfAcctCounters
+			fp.syncProxyRules()
+
+			expected := tc.dropRule + kubeForwardChainRules
 			assertIPTablesChainEqual(t, getLine(), utiliptables.TableFilter, kubeForwardChain, expected, fp.iptablesData.String())
 		})
 	}
@@ -2832,12 +2669,12 @@ func TestExternalTrafficPolicyLocal(t *testing.T) {
 				Addresses: []string{epIP1},
 			}, {
 				Addresses: []string{epIP2},
-				NodeName:  pointer.String(testHostname),
+				NodeName:  ptr.To(testHostname),
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -2949,12 +2786,12 @@ func TestExternalTrafficPolicyCluster(t *testing.T) {
 				NodeName:  nil,
 			}, {
 				Addresses: []string{epIP2},
-				NodeName:  pointer.String(testHostname),
+				NodeName:  ptr.To(testHostname),
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -3371,7 +3208,12 @@ func makeServiceMap(proxier *Proxier, allServices ...*v1.Service) {
 	proxier.servicesSynced = true
 }
 
-func compareEndpointsMapsExceptChainName(t *testing.T, tci int, newMap proxy.EndpointsMap, expected map[proxy.ServicePortName][]*endpointInfo) {
+type endpointExpectation struct {
+	endpoint string
+	isLocal  bool
+}
+
+func checkEndpointExpectations(t *testing.T, tci int, newMap proxy.EndpointsMap, expected map[proxy.ServicePortName][]endpointExpectation) {
 	if len(newMap) != len(expected) {
 		t.Errorf("[%d] expected %d results, got %d: %v", tci, len(expected), len(newMap), newMap)
 	}
@@ -3380,13 +3222,9 @@ func compareEndpointsMapsExceptChainName(t *testing.T, tci int, newMap proxy.End
 			t.Errorf("[%d] expected %d endpoints for %v, got %d", tci, len(expected[x]), x, len(newMap[x]))
 		} else {
 			for i := range expected[x] {
-				newEp, ok := newMap[x][i].(*endpointInfo)
-				if !ok {
-					t.Errorf("Failed to cast endpointInfo")
-					continue
-				}
-				if newEp.Endpoint != expected[x][i].Endpoint ||
-					newEp.IsLocal != expected[x][i].IsLocal {
+				newEp := newMap[x][i]
+				if newEp.String() != expected[x][i].endpoint ||
+					newEp.IsLocal() != expected[x][i].isLocal {
 					t.Errorf("[%d] expected new[%v][%d] to be %v, got %v", tci, x, i, expected[x][i], newEp)
 				}
 			}
@@ -3395,9 +3233,6 @@ func compareEndpointsMapsExceptChainName(t *testing.T, tci int, newMap proxy.End
 }
 
 func TestUpdateEndpointsMap(t *testing.T) {
-	var nodeName = testHostname
-	udpProtocol := v1.ProtocolUDP
-
 	emptyEndpointSlices := []*discovery.EndpointSlice{
 		makeTestEndpointSlice("ns1", "ep1", 1, func(*discovery.EndpointSlice) {}),
 	}
@@ -3407,9 +3242,9 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.1"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p11"),
-			Port:     pointer.Int32(11),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p11"),
+			Port:     ptr.To[int32](11),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	subset2 := func(eps *discovery.EndpointSlice) {
@@ -3418,9 +3253,9 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.2"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p12"),
-			Port:     pointer.Int32(12),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p12"),
+			Port:     ptr.To[int32](12),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	namedPortLocal := []*discovery.EndpointSlice{
@@ -3429,12 +3264,12 @@ func TestUpdateEndpointsMap(t *testing.T) {
 				eps.AddressType = discovery.AddressTypeIPv4
 				eps.Endpoints = []discovery.Endpoint{{
 					Addresses: []string{"10.1.1.1"},
-					NodeName:  &nodeName,
+					NodeName:  ptr.To(testHostname),
 				}}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p11"),
-					Port:     pointer.Int32(11),
-					Protocol: &udpProtocol,
+					Name:     ptr.To("p11"),
+					Port:     ptr.To[int32](11),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				}}
 			}),
 	}
@@ -3449,9 +3284,9 @@ func TestUpdateEndpointsMap(t *testing.T) {
 					Addresses: []string{"10.1.1.1"},
 				}}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p11-2"),
-					Port:     pointer.Int32(11),
-					Protocol: &udpProtocol,
+					Name:     ptr.To("p11-2"),
+					Port:     ptr.To[int32](11),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				}}
 			}),
 	}
@@ -3463,9 +3298,9 @@ func TestUpdateEndpointsMap(t *testing.T) {
 					Addresses: []string{"10.1.1.1"},
 				}}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p11"),
-					Port:     pointer.Int32(22),
-					Protocol: &udpProtocol,
+					Name:     ptr.To("p11"),
+					Port:     ptr.To[int32](22),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				}}
 			}),
 	}
@@ -3477,16 +3312,16 @@ func TestUpdateEndpointsMap(t *testing.T) {
 					Addresses: []string{"10.1.1.1"},
 				}, {
 					Addresses: []string{"10.1.1.2"},
-					NodeName:  &nodeName,
+					NodeName:  ptr.To(testHostname),
 				}}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p11"),
-					Port:     pointer.Int32(11),
-					Protocol: &udpProtocol,
+					Name:     ptr.To("p11"),
+					Port:     ptr.To[int32](11),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				}, {
-					Name:     pointer.String("p12"),
-					Port:     pointer.Int32(12),
-					Protocol: &udpProtocol,
+					Name:     ptr.To("p12"),
+					Port:     ptr.To[int32](12),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				}}
 			}),
 	}
@@ -3498,12 +3333,12 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.1.1.2"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p12"),
-			Port:     pointer.Int32(12),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p12"),
+			Port:     ptr.To[int32](12),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	multipleSubsetsWithLocal := []*discovery.EndpointSlice{
@@ -3514,16 +3349,16 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.1.1.1"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p11"),
-			Port:     pointer.Int32(11),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p11"),
+			Port:     ptr.To[int32](11),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}, {
-			Name:     pointer.String("p12"),
-			Port:     pointer.Int32(12),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p12"),
+			Port:     ptr.To[int32](12),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	subset3 := func(eps *discovery.EndpointSlice) {
@@ -3532,9 +3367,9 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.3"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p13"),
-			Port:     pointer.Int32(13),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p13"),
+			Port:     ptr.To[int32](13),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	multipleSubsetsMultiplePortsLocal := []*discovery.EndpointSlice{
@@ -3547,16 +3382,16 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.1"},
 		}, {
 			Addresses: []string{"10.1.1.2"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p11"),
-			Port:     pointer.Int32(11),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p11"),
+			Port:     ptr.To[int32](11),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}, {
-			Name:     pointer.String("p12"),
-			Port:     pointer.Int32(12),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p12"),
+			Port:     ptr.To[int32](12),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	subsetMultipleIPsPorts2 := func(eps *discovery.EndpointSlice) {
@@ -3565,16 +3400,16 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.3"},
 		}, {
 			Addresses: []string{"10.1.1.4"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p13"),
-			Port:     pointer.Int32(13),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p13"),
+			Port:     ptr.To[int32](13),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}, {
-			Name:     pointer.String("p14"),
-			Port:     pointer.Int32(14),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p14"),
+			Port:     ptr.To[int32](14),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	subsetMultipleIPsPorts3 := func(eps *discovery.EndpointSlice) {
@@ -3583,16 +3418,16 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.2.2.1"},
 		}, {
 			Addresses: []string{"10.2.2.2"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p21"),
-			Port:     pointer.Int32(21),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p21"),
+			Port:     ptr.To[int32](21),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}, {
-			Name:     pointer.String("p22"),
-			Port:     pointer.Int32(22),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p22"),
+			Port:     ptr.To[int32](22),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	multipleSubsetsIPsPorts := []*discovery.EndpointSlice{
@@ -3604,54 +3439,54 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.2.2.2"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}, {
 			Addresses: []string{"10.2.2.22"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p22"),
-			Port:     pointer.Int32(22),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p22"),
+			Port:     ptr.To[int32](22),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset2 := func(eps *discovery.EndpointSlice) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.2.2.3"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p23"),
-			Port:     pointer.Int32(23),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p23"),
+			Port:     ptr.To[int32](23),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset3 := func(eps *discovery.EndpointSlice) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.4.4.4"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}, {
 			Addresses: []string{"10.4.4.5"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p44"),
-			Port:     pointer.Int32(44),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p44"),
+			Port:     ptr.To[int32](44),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset4 := func(eps *discovery.EndpointSlice) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.4.4.6"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p45"),
-			Port:     pointer.Int32(45),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p45"),
+			Port:     ptr.To[int32](45),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset5 := func(eps *discovery.EndpointSlice) {
@@ -3662,9 +3497,9 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.11"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p11"),
-			Port:     pointer.Int32(11),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p11"),
+			Port:     ptr.To[int32](11),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset6 := func(eps *discovery.EndpointSlice) {
@@ -3673,13 +3508,13 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.1.1.2"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p12"),
-			Port:     pointer.Int32(12),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p12"),
+			Port:     ptr.To[int32](12),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}, {
-			Name:     pointer.String("p122"),
-			Port:     pointer.Int32(122),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p122"),
+			Port:     ptr.To[int32](122),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset7 := func(eps *discovery.EndpointSlice) {
@@ -3688,21 +3523,21 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			Addresses: []string{"10.3.3.3"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p33"),
-			Port:     pointer.Int32(33),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p33"),
+			Port:     ptr.To[int32](33),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexSubset8 := func(eps *discovery.EndpointSlice) {
 		eps.AddressType = discovery.AddressTypeIPv4
 		eps.Endpoints = []discovery.Endpoint{{
 			Addresses: []string{"10.4.4.4"},
-			NodeName:  &nodeName,
+			NodeName:  ptr.To(testHostname),
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p44"),
-			Port:     pointer.Int32(44),
-			Protocol: &udpProtocol,
+			Name:     ptr.To("p44"),
+			Port:     ptr.To[int32](44),
+			Protocol: ptr.To(v1.ProtocolUDP),
 		}}
 	}
 	complexBefore := []*discovery.EndpointSlice{
@@ -3731,16 +3566,16 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name                           string
 		previousEndpoints              []*discovery.EndpointSlice
 		currentEndpoints               []*discovery.EndpointSlice
-		oldEndpoints                   map[proxy.ServicePortName][]*endpointInfo
-		expectedResult                 map[proxy.ServicePortName][]*endpointInfo
+		oldEndpoints                   map[proxy.ServicePortName][]endpointExpectation
+		expectedResult                 map[proxy.ServicePortName][]endpointExpectation
 		expectedDeletedUDPEndpoints    []proxy.ServiceEndpoint
 		expectedNewlyActiveUDPServices map[proxy.ServicePortName]bool
 		expectedLocalEndpoints         map[types.NamespacedName]int
 	}{{
 		// Case[0]: nothing
 		name:                           "nothing",
-		oldEndpoints:                   map[proxy.ServicePortName][]*endpointInfo{},
-		expectedResult:                 map[proxy.ServicePortName][]*endpointInfo{},
+		oldEndpoints:                   map[proxy.ServicePortName][]endpointExpectation{},
+		expectedResult:                 map[proxy.ServicePortName][]endpointExpectation{},
 		expectedDeletedUDPEndpoints:    []proxy.ServiceEndpoint{},
 		expectedNewlyActiveUDPServices: map[proxy.ServicePortName]bool{},
 		expectedLocalEndpoints:         map[types.NamespacedName]int{},
@@ -3749,14 +3584,14 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "no change, named port, local",
 		previousEndpoints: namedPortLocal,
 		currentEndpoints:  namedPortLocal,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: true},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: true},
 			},
 		},
 		expectedDeletedUDPEndpoints:    []proxy.ServiceEndpoint{},
@@ -3769,20 +3604,20 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "no change, multiple subsets",
 		previousEndpoints: multipleSubsets,
 		currentEndpoints:  multipleSubsets,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.2:12", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.2:12", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints:    []proxy.ServiceEndpoint{},
@@ -3793,26 +3628,26 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "no change, multiple subsets, multiple ports, local",
 		previousEndpoints: multipleSubsetsMultiplePortsLocal,
 		currentEndpoints:  multipleSubsetsMultiplePortsLocal,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:12", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p13", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.3:13", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.3:13", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:12", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p13", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.3:13", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.3:13", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints:    []proxy.ServiceEndpoint{},
@@ -3825,56 +3660,56 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "no change, multiple endpoints, subsets, IPs, and ports",
 		previousEndpoints: multipleSubsetsIPsPorts,
 		currentEndpoints:  multipleSubsetsIPsPorts,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
+				{endpoint: "10.1.1.2:11", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:12", isLocal: false},
+				{endpoint: "10.1.1.2:12", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p13", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.3:13", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.4:13", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.3:13", isLocal: false},
+				{endpoint: "10.1.1.4:13", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p14", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.3:14", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.4:14", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.3:14", isLocal: false},
+				{endpoint: "10.1.1.4:14", isLocal: true},
 			},
 			makeServicePortName("ns2", "ep2", "p21", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.1:21", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.2:21", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.2.2.1:21", isLocal: false},
+				{endpoint: "10.2.2.2:21", isLocal: true},
 			},
 			makeServicePortName("ns2", "ep2", "p22", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.1:22", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.2:22", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.2.2.1:22", isLocal: false},
+				{endpoint: "10.2.2.2:22", isLocal: true},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
+				{endpoint: "10.1.1.2:11", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:12", isLocal: false},
+				{endpoint: "10.1.1.2:12", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p13", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.3:13", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.4:13", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.3:13", isLocal: false},
+				{endpoint: "10.1.1.4:13", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p14", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.3:14", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.4:14", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.3:14", isLocal: false},
+				{endpoint: "10.1.1.4:14", isLocal: true},
 			},
 			makeServicePortName("ns2", "ep2", "p21", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.1:21", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.2:21", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.2.2.1:21", isLocal: false},
+				{endpoint: "10.2.2.2:21", isLocal: true},
 			},
 			makeServicePortName("ns2", "ep2", "p22", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.1:22", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.2:22", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.2.2.1:22", isLocal: false},
+				{endpoint: "10.2.2.2:22", isLocal: true},
 			},
 		},
 		expectedDeletedUDPEndpoints:    []proxy.ServiceEndpoint{},
@@ -3888,10 +3723,10 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "add an Endpoints",
 		previousEndpoints: []*discovery.EndpointSlice{nil},
 		currentEndpoints:  namedPortLocal,
-		oldEndpoints:      map[proxy.ServicePortName][]*endpointInfo{},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints:      map[proxy.ServicePortName][]endpointExpectation{},
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: true},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{},
@@ -3906,12 +3741,12 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "remove an Endpoints",
 		previousEndpoints: namedPortLocal,
 		currentEndpoints:  []*discovery.EndpointSlice{nil},
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: true},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{},
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{{
 			Endpoint:        "10.1.1.1:11",
 			ServicePortName: makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP),
@@ -3923,19 +3758,19 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "add an IP and port",
 		previousEndpoints: namedPort,
 		currentEndpoints:  namedPortsLocalNoLocal,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
+				{endpoint: "10.1.1.2:11", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:12", isLocal: false},
+				{endpoint: "10.1.1.2:12", isLocal: true},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{},
@@ -3950,19 +3785,19 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "remove an IP and port",
 		previousEndpoints: namedPortsLocalNoLocal,
 		currentEndpoints:  namedPort,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:11", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
+				{endpoint: "10.1.1.2:11", isLocal: true},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:12", isLocal: false},
+				{endpoint: "10.1.1.2:12", isLocal: true},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{{
@@ -3982,17 +3817,17 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "add a subset",
 		previousEndpoints: []*discovery.EndpointSlice{namedPort[0], nil},
 		currentEndpoints:  multipleSubsetsWithLocal,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.2:12", isLocal: true},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{},
@@ -4007,17 +3842,17 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "remove a subset",
 		previousEndpoints: multipleSubsets,
 		currentEndpoints:  []*discovery.EndpointSlice{namedPort[0], nil},
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.2:12", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{{
@@ -4031,14 +3866,14 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "rename a port",
 		previousEndpoints: namedPort,
 		currentEndpoints:  namedPortRenamed,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11-2", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{{
@@ -4054,14 +3889,14 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "renumber a port",
 		previousEndpoints: namedPort,
 		currentEndpoints:  namedPortRenumbered,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:22", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:22", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{{
@@ -4075,41 +3910,41 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "complex add and remove",
 		previousEndpoints: complexBefore,
 		currentEndpoints:  complexAfter,
-		oldEndpoints: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 			makeServicePortName("ns2", "ep2", "p22", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.22:22", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.2:22", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.2.2.22:22", isLocal: true},
+				{endpoint: "10.2.2.2:22", isLocal: true},
 			},
 			makeServicePortName("ns2", "ep2", "p23", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.2.2.3:23", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.2.2.3:23", isLocal: true},
 			},
 			makeServicePortName("ns4", "ep4", "p44", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.4.4.4:44", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.4.4.5:44", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.4.4.4:44", isLocal: true},
+				{endpoint: "10.4.4.5:44", isLocal: true},
 			},
 			makeServicePortName("ns4", "ep4", "p45", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.4.4.6:45", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.4.4.6:45", isLocal: true},
 			},
 		},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.11:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.11:11", isLocal: false},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 			makeServicePortName("ns1", "ep1", "p12", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:12", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.2:12", isLocal: false},
 			},
 			makeServicePortName("ns1", "ep1", "p122", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.2:122", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.2:122", isLocal: false},
 			},
 			makeServicePortName("ns3", "ep3", "p33", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.3.3.3:33", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.3.3.3:33", isLocal: false},
 			},
 			makeServicePortName("ns4", "ep4", "p44", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.4.4.4:44", IsLocal: true, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.4.4.4:44", isLocal: true},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{{
@@ -4141,10 +3976,10 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		name:              "change from 0 endpoint address to 1 unnamed port",
 		previousEndpoints: emptyEndpointSlices,
 		currentEndpoints:  namedPort,
-		oldEndpoints:      map[proxy.ServicePortName][]*endpointInfo{},
-		expectedResult: map[proxy.ServicePortName][]*endpointInfo{
+		oldEndpoints:      map[proxy.ServicePortName][]endpointExpectation{},
+		expectedResult: map[proxy.ServicePortName][]endpointExpectation{
 			makeServicePortName("ns1", "ep1", "p11", v1.ProtocolUDP): {
-				{BaseEndpointInfo: &proxy.BaseEndpointInfo{Endpoint: "10.1.1.1:11", IsLocal: false, Ready: true, Serving: true, Terminating: false}},
+				{endpoint: "10.1.1.1:11", isLocal: false},
 			},
 		},
 		expectedDeletedUDPEndpoints: []proxy.ServiceEndpoint{},
@@ -4159,7 +3994,7 @@ func TestUpdateEndpointsMap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ipt := iptablestest.NewFake()
 			fp := NewFakeProxier(ipt)
-			fp.hostname = nodeName
+			fp.hostname = testHostname
 
 			// First check that after adding all previous versions of endpoints,
 			// the fp.oldEndpoints is as we expect.
@@ -4169,7 +4004,7 @@ func TestUpdateEndpointsMap(t *testing.T) {
 				}
 			}
 			fp.endpointsMap.Update(fp.endpointsChanges)
-			compareEndpointsMapsExceptChainName(t, tci, fp.endpointsMap, tc.oldEndpoints)
+			checkEndpointExpectations(t, tci, fp.endpointsMap, tc.oldEndpoints)
 
 			// Now let's call appropriate handlers to get to state we want to be.
 			if len(tc.previousEndpoints) != len(tc.currentEndpoints) {
@@ -4189,7 +4024,7 @@ func TestUpdateEndpointsMap(t *testing.T) {
 			}
 			result := fp.endpointsMap.Update(fp.endpointsChanges)
 			newMap := fp.endpointsMap
-			compareEndpointsMapsExceptChainName(t, tci, newMap, tc.expectedResult)
+			checkEndpointExpectations(t, tci, newMap, tc.expectedResult)
 			if len(result.DeletedUDPEndpoints) != len(tc.expectedDeletedUDPEndpoints) {
 				t.Errorf("[%d] expected %d staleEndpoints, got %d: %v", tci, len(tc.expectedDeletedUDPEndpoints), len(result.DeletedUDPEndpoints), result.DeletedUDPEndpoints)
 			}
@@ -4253,27 +4088,27 @@ func TestHealthCheckNodePortWhenTerminating(t *testing.T) {
 			Labels:    map[string]string{discovery.LabelServiceName: serviceName},
 		},
 		Ports: []discovery.EndpointPort{{
-			Name:     pointer.String(""),
-			Port:     pointer.Int32(80),
-			Protocol: &tcpProtocol,
+			Name:     ptr.To(""),
+			Port:     ptr.To[int32](80),
+			Protocol: ptr.To(v1.ProtocolTCP),
 		}},
 		AddressType: discovery.AddressTypeIPv4,
 		Endpoints: []discovery.Endpoint{{
 			Addresses:  []string{"10.0.1.1"},
-			Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
-			NodeName:   pointer.String(testHostname),
+			Conditions: discovery.EndpointConditions{Ready: ptr.To(true)},
+			NodeName:   ptr.To(testHostname),
 		}, {
 			Addresses:  []string{"10.0.1.2"},
-			Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
-			NodeName:   pointer.String(testHostname),
+			Conditions: discovery.EndpointConditions{Ready: ptr.To(true)},
+			NodeName:   ptr.To(testHostname),
 		}, {
 			Addresses:  []string{"10.0.1.3"},
-			Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
-			NodeName:   pointer.String(testHostname),
+			Conditions: discovery.EndpointConditions{Ready: ptr.To(true)},
+			NodeName:   ptr.To(testHostname),
 		}, { // not ready endpoints should be ignored
 			Addresses:  []string{"10.0.1.4"},
-			Conditions: discovery.EndpointConditions{Ready: pointer.Bool(false)},
-			NodeName:   pointer.String(testHostname),
+			Conditions: discovery.EndpointConditions{Ready: ptr.To(false)},
+			NodeName:   ptr.To(testHostname),
 		}},
 	}
 
@@ -4292,43 +4127,43 @@ func TestHealthCheckNodePortWhenTerminating(t *testing.T) {
 			Labels:    map[string]string{discovery.LabelServiceName: serviceName},
 		},
 		Ports: []discovery.EndpointPort{{
-			Name:     pointer.String(""),
-			Port:     pointer.Int32(80),
-			Protocol: &tcpProtocol,
+			Name:     ptr.To(""),
+			Port:     ptr.To[int32](80),
+			Protocol: ptr.To(v1.ProtocolTCP),
 		}},
 		AddressType: discovery.AddressTypeIPv4,
 		Endpoints: []discovery.Endpoint{{
 			Addresses: []string{"10.0.1.1"},
 			Conditions: discovery.EndpointConditions{
-				Ready:       pointer.Bool(false),
-				Serving:     pointer.Bool(true),
-				Terminating: pointer.Bool(false),
+				Ready:       ptr.To(false),
+				Serving:     ptr.To(true),
+				Terminating: ptr.To(false),
 			},
-			NodeName: pointer.String(testHostname),
+			NodeName: ptr.To(testHostname),
 		}, {
 			Addresses: []string{"10.0.1.2"},
 			Conditions: discovery.EndpointConditions{
-				Ready:       pointer.Bool(false),
-				Serving:     pointer.Bool(true),
-				Terminating: pointer.Bool(true),
+				Ready:       ptr.To(false),
+				Serving:     ptr.To(true),
+				Terminating: ptr.To(true),
 			},
-			NodeName: pointer.String(testHostname),
+			NodeName: ptr.To(testHostname),
 		}, {
 			Addresses: []string{"10.0.1.3"},
 			Conditions: discovery.EndpointConditions{
-				Ready:       pointer.Bool(false),
-				Serving:     pointer.Bool(true),
-				Terminating: pointer.Bool(true),
+				Ready:       ptr.To(false),
+				Serving:     ptr.To(true),
+				Terminating: ptr.To(true),
 			},
-			NodeName: pointer.String(testHostname),
+			NodeName: ptr.To(testHostname),
 		}, { // not ready endpoints should be ignored
 			Addresses: []string{"10.0.1.4"},
 			Conditions: discovery.EndpointConditions{
-				Ready:       pointer.Bool(false),
-				Serving:     pointer.Bool(false),
-				Terminating: pointer.Bool(true),
+				Ready:       ptr.To(false),
+				Serving:     ptr.To(false),
+				Terminating: ptr.To(true),
 			},
-			NodeName: pointer.String(testHostname),
+			NodeName: ptr.To(testHostname),
 		}},
 	}
 
@@ -4340,145 +4175,12 @@ func TestHealthCheckNodePortWhenTerminating(t *testing.T) {
 	}
 }
 
-func TestProxierDeleteNodePortStaleUDP(t *testing.T) {
-	fcmd := fakeexec.FakeCmd{}
-	fexec := &fakeexec.FakeExec{
-		LookPathFunc: func(cmd string) (string, error) { return cmd, nil },
-	}
-	execFunc := func(cmd string, args ...string) exec.Cmd {
-		return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
-	}
-	cmdOutput := "1 flow entries have been deleted"
-	cmdFunc := func() ([]byte, []byte, error) { return []byte(cmdOutput), nil, nil }
-
-	// Delete ClusterIP entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-	// Delete ExternalIP entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-	// Delete LoadBalancerIP entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-	// Delete NodePort entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-
-	ipt := iptablestest.NewFake()
-	fp := NewFakeProxier(ipt)
-	fp.exec = fexec
-
-	svcIP := "172.30.0.41"
-	extIP := "192.168.99.11"
-	lbIngressIP := "1.2.3.4"
-	svcPort := 80
-	nodePort := 31201
-	svcPortName := proxy.ServicePortName{
-		NamespacedName: makeNSN("ns1", "svc1"),
-		Port:           "p80",
-		Protocol:       v1.ProtocolUDP,
-	}
-
-	makeServiceMap(fp,
-		makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {
-			svc.Spec.ClusterIP = svcIP
-			svc.Spec.ExternalIPs = []string{extIP}
-			svc.Spec.Type = "LoadBalancer"
-			svc.Spec.Ports = []v1.ServicePort{{
-				Name:     svcPortName.Port,
-				Port:     int32(svcPort),
-				Protocol: v1.ProtocolUDP,
-				NodePort: int32(nodePort),
-			}}
-			svc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{{
-				IP: lbIngressIP,
-			}}
-		}),
-	)
-
-	fp.syncProxyRules()
-	if fexec.CommandCalls != 0 {
-		t.Fatalf("Created service without endpoints must not clear conntrack entries")
-	}
-
-	epIP := "10.180.0.1"
-	udpProtocol := v1.ProtocolUDP
-	populateEndpointSlices(fp,
-		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
-			eps.AddressType = discovery.AddressTypeIPv4
-			eps.Endpoints = []discovery.Endpoint{{
-				Addresses: []string{epIP},
-				Conditions: discovery.EndpointConditions{
-					Serving: pointer.Bool(false),
-				},
-			}}
-			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &udpProtocol,
-			}}
-		}),
-	)
-
-	fp.syncProxyRules()
-
-	if fexec.CommandCalls != 0 {
-		t.Fatalf("Updated UDP service with not ready endpoints must not clear UDP entries")
-	}
-
-	populateEndpointSlices(fp,
-		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
-			eps.AddressType = discovery.AddressTypeIPv4
-			eps.Endpoints = []discovery.Endpoint{{
-				Addresses: []string{epIP},
-				Conditions: discovery.EndpointConditions{
-					Serving: pointer.Bool(true),
-				},
-			}}
-			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &udpProtocol,
-			}}
-		}),
-	)
-
-	fp.syncProxyRules()
-
-	if fexec.CommandCalls != 4 {
-		t.Fatalf("Updated UDP service with new endpoints must clear UDP entries 4 times: ClusterIP, NodePort, ExternalIP and LB")
-	}
-
-	// the order is not guaranteed so we have to compare the strings in any order
-	expectedCommands := []string{
-		// Delete ClusterIP Conntrack entries
-		fmt.Sprintf("conntrack -D --orig-dst %s -p %s", svcIP, strings.ToLower(string((v1.ProtocolUDP)))),
-		// Delete ExternalIP Conntrack entries
-		fmt.Sprintf("conntrack -D --orig-dst %s -p %s", extIP, strings.ToLower(string((v1.ProtocolUDP)))),
-		// Delete LoadBalancerIP Conntrack entries
-		fmt.Sprintf("conntrack -D --orig-dst %s -p %s", lbIngressIP, strings.ToLower(string((v1.ProtocolUDP)))),
-		// Delete NodePort Conntrack entrie
-		fmt.Sprintf("conntrack -D -p %s --dport %d", strings.ToLower(string((v1.ProtocolUDP))), nodePort),
-	}
-	actualCommands := []string{
-		strings.Join(fcmd.CombinedOutputLog[0], " "),
-		strings.Join(fcmd.CombinedOutputLog[1], " "),
-		strings.Join(fcmd.CombinedOutputLog[2], " "),
-		strings.Join(fcmd.CombinedOutputLog[3], " "),
-	}
-	sort.Strings(expectedCommands)
-	sort.Strings(actualCommands)
-
-	if !reflect.DeepEqual(expectedCommands, actualCommands) {
-		t.Errorf("Expected commands: %v, but executed %v", expectedCommands, actualCommands)
-	}
-}
-
-func TestProxierMetricsIptablesTotalRules(t *testing.T) {
+func TestProxierMetricsIPTablesTotalRules(t *testing.T) {
+	logger, _ := klogtesting.NewTestContext(t)
 	ipt := iptablestest.NewFake()
 	fp := NewFakeProxier(ipt)
 
-	metrics.RegisterMetrics()
+	metrics.RegisterMetrics(kubeproxyconfig.ProxyModeIPTables)
 
 	svcIP := "172.30.0.41"
 	svcPort := 80
@@ -4503,15 +4205,15 @@ func TestProxierMetricsIptablesTotalRules(t *testing.T) {
 	fp.syncProxyRules()
 	iptablesData := fp.iptablesData.String()
 
-	nFilterRules := countRulesFromMetric(utiliptables.TableFilter)
-	expectedFilterRules := countRules(utiliptables.TableFilter, iptablesData)
+	nFilterRules := countRulesFromMetric(logger, utiliptables.TableFilter)
+	expectedFilterRules := countRules(logger, utiliptables.TableFilter, iptablesData)
 
 	if nFilterRules != expectedFilterRules {
 		t.Fatalf("Wrong number of filter rule: expected %d got %d\n%s", expectedFilterRules, nFilterRules, iptablesData)
 	}
 
-	nNatRules := countRulesFromMetric(utiliptables.TableNAT)
-	expectedNatRules := countRules(utiliptables.TableNAT, iptablesData)
+	nNatRules := countRulesFromMetric(logger, utiliptables.TableNAT)
+	expectedNatRules := countRules(logger, utiliptables.TableNAT, iptablesData)
 
 	if nNatRules != expectedNatRules {
 		t.Fatalf("Wrong number of nat rules: expected %d got %d\n%s", expectedNatRules, nNatRules, iptablesData)
@@ -4526,9 +4228,9 @@ func TestProxierMetricsIptablesTotalRules(t *testing.T) {
 				Addresses: []string{"10.0.0.5"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String(svcPortName.Port),
-				Port:     pointer.Int32(int32(svcPort)),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To(svcPortName.Port),
+				Port:     ptr.To(int32(svcPort)),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -4536,15 +4238,15 @@ func TestProxierMetricsIptablesTotalRules(t *testing.T) {
 	fp.syncProxyRules()
 	iptablesData = fp.iptablesData.String()
 
-	nFilterRules = countRulesFromMetric(utiliptables.TableFilter)
-	expectedFilterRules = countRules(utiliptables.TableFilter, iptablesData)
+	nFilterRules = countRulesFromMetric(logger, utiliptables.TableFilter)
+	expectedFilterRules = countRules(logger, utiliptables.TableFilter, iptablesData)
 
 	if nFilterRules != expectedFilterRules {
 		t.Fatalf("Wrong number of filter rule: expected %d got %d\n%s", expectedFilterRules, nFilterRules, iptablesData)
 	}
 
-	nNatRules = countRulesFromMetric(utiliptables.TableNAT)
-	expectedNatRules = countRules(utiliptables.TableNAT, iptablesData)
+	nNatRules = countRulesFromMetric(logger, utiliptables.TableNAT)
+	expectedNatRules = countRules(logger, utiliptables.TableNAT, iptablesData)
 
 	if nNatRules != expectedNatRules {
 		t.Fatalf("Wrong number of nat rules: expected %d got %d\n%s", expectedNatRules, nNatRules, iptablesData)
@@ -4561,9 +4263,6 @@ func TestInternalTrafficPolicy(t *testing.T) {
 		hostname string
 	}
 
-	cluster := v1.ServiceInternalTrafficPolicyCluster
-	local := v1.ServiceInternalTrafficPolicyLocal
-
 	testCases := []struct {
 		name                  string
 		line                  int
@@ -4574,7 +4273,7 @@ func TestInternalTrafficPolicy(t *testing.T) {
 		{
 			name:                  "internalTrafficPolicy is cluster",
 			line:                  getLine(),
-			internalTrafficPolicy: &cluster,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyCluster),
 			endpoints: []endpoint{
 				{"10.0.1.1", testHostname},
 				{"10.0.1.2", "host1"},
@@ -4594,7 +4293,7 @@ func TestInternalTrafficPolicy(t *testing.T) {
 		{
 			name:                  "internalTrafficPolicy is local and there is one local endpoint",
 			line:                  getLine(),
-			internalTrafficPolicy: &local,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
 			endpoints: []endpoint{
 				{"10.0.1.1", testHostname},
 				{"10.0.1.2", "host1"},
@@ -4614,7 +4313,7 @@ func TestInternalTrafficPolicy(t *testing.T) {
 		{
 			name:                  "internalTrafficPolicy is local and there are multiple local endpoints",
 			line:                  getLine(),
-			internalTrafficPolicy: &local,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
 			endpoints: []endpoint{
 				{"10.0.1.1", testHostname},
 				{"10.0.1.2", testHostname},
@@ -4634,7 +4333,7 @@ func TestInternalTrafficPolicy(t *testing.T) {
 		{
 			name:                  "internalTrafficPolicy is local and there are no local endpoints",
 			line:                  getLine(),
-			internalTrafficPolicy: &local,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
 			endpoints: []endpoint{
 				{"10.0.1.1", "host0"},
 				{"10.0.1.2", "host1"},
@@ -4683,17 +4382,17 @@ func TestInternalTrafficPolicy(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: serviceName},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 			}
 			for _, ep := range tc.endpoints {
 				endpointSlice.Endpoints = append(endpointSlice.Endpoints, discovery.Endpoint{
 					Addresses:  []string{ep.ip},
-					Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
-					NodeName:   pointer.String(ep.hostname),
+					Conditions: discovery.EndpointConditions{Ready: ptr.To(true)},
+					NodeName:   ptr.To(ep.hostname),
 				})
 			}
 
@@ -4760,59 +4459,59 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
 					{
 						Addresses: []string{"10.0.1.1"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						Addresses: []string{"10.0.1.2"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be ignored for external since there are ready non-terminating endpoints
 						Addresses: []string{"10.0.1.3"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be ignored for external since there are ready non-terminating endpoints
 						Addresses: []string{"10.0.1.4"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be ignored for external since it's not local
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String("host-1"),
+						NodeName: ptr.To("host-1"),
 					},
 				},
 			},
@@ -4845,9 +4544,9 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
@@ -4855,41 +4554,41 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 						// this endpoint should be used since there are only ready terminating endpoints
 						Addresses: []string{"10.0.1.2"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be used since there are only ready terminating endpoints
 						Addresses: []string{"10.0.1.3"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should not be used since it is both terminating and not ready.
 						Addresses: []string{"10.0.1.4"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be ignored for external since it's not local
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String("host-1"),
+						NodeName: ptr.To("host-1"),
 					},
 				},
 			},
@@ -4922,9 +4621,9 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
@@ -4933,11 +4632,11 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 						// but it will prevent a REJECT rule from being created
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("host-1"),
+						NodeName: ptr.To("host-1"),
 					},
 				},
 			},
@@ -4968,9 +4667,9 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
@@ -4978,21 +4677,21 @@ func TestTerminatingEndpointsTrafficPolicyLocal(t *testing.T) {
 						// Local but not ready or serving
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// Remote and not ready or serving
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("host-1"),
+						NodeName: ptr.To("host-1"),
 					},
 				},
 			},
@@ -5094,58 +4793,58 @@ func TestTerminatingEndpointsTrafficPolicyCluster(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
 					{
 						Addresses: []string{"10.0.1.1"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						Addresses: []string{"10.0.1.2"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be ignored since there are ready non-terminating endpoints
 						Addresses: []string{"10.0.1.3"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("another-host"),
+						NodeName: ptr.To("another-host"),
 					},
 					{
 						// this endpoint should be ignored since it is not "serving"
 						Addresses: []string{"10.0.1.4"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("another-host"),
+						NodeName: ptr.To("another-host"),
 					},
 					{
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(true),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(false),
+							Ready:       ptr.To(true),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(false),
 						},
-						NodeName: pointer.String("another-host"),
+						NodeName: ptr.To("another-host"),
 					},
 				},
 			},
@@ -5178,9 +4877,9 @@ func TestTerminatingEndpointsTrafficPolicyCluster(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
@@ -5188,41 +4887,41 @@ func TestTerminatingEndpointsTrafficPolicyCluster(t *testing.T) {
 						// this endpoint should be used since there are only ready terminating endpoints
 						Addresses: []string{"10.0.1.2"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should be used since there are only ready terminating endpoints
 						Addresses: []string{"10.0.1.3"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// this endpoint should not be used since it is both terminating and not ready.
 						Addresses: []string{"10.0.1.4"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("another-host"),
+						NodeName: ptr.To("another-host"),
 					},
 					{
 						// this endpoint should be used since there are only ready terminating endpoints
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("another-host"),
+						NodeName: ptr.To("another-host"),
 					},
 				},
 			},
@@ -5255,20 +4954,20 @@ func TestTerminatingEndpointsTrafficPolicyCluster(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
 					{
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(true),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(true),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("host-1"),
+						NodeName: ptr.To("host-1"),
 					},
 				},
 			},
@@ -5301,9 +5000,9 @@ func TestTerminatingEndpointsTrafficPolicyCluster(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: "svc1"},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 				Endpoints: []discovery.Endpoint{
@@ -5311,21 +5010,21 @@ func TestTerminatingEndpointsTrafficPolicyCluster(t *testing.T) {
 						// Local, not ready or serving
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String(testHostname),
+						NodeName: ptr.To(testHostname),
 					},
 					{
 						// Remote, not ready or serving
 						Addresses: []string{"10.0.1.5"},
 						Conditions: discovery.EndpointConditions{
-							Ready:       pointer.Bool(false),
-							Serving:     pointer.Bool(false),
-							Terminating: pointer.Bool(true),
+							Ready:       ptr.To(false),
+							Serving:     ptr.To(false),
+							Terminating: ptr.To(true),
 						},
-						NodeName: pointer.String("host-1"),
+						NodeName: ptr.To("host-1"),
 					},
 				},
 			},
@@ -5388,8 +5087,6 @@ func TestInternalExternalMasquerade(t *testing.T) {
 	// (Put the test setup code in an internal function so we can have it here at the
 	// top, before the test cases that will be run against it.)
 	setupTest := func(fp *Proxier) {
-		local := v1.ServiceInternalTrafficPolicyLocal
-
 		makeServiceMap(fp,
 			makeTestService("ns1", "svc1", func(svc *v1.Service) {
 				svc.Spec.Type = "LoadBalancer"
@@ -5430,7 +5127,7 @@ func TestInternalExternalMasquerade(t *testing.T) {
 					NodePort: int32(3003),
 				}}
 				svc.Spec.HealthCheckNodePort = 30003
-				svc.Spec.InternalTrafficPolicy = &local
+				svc.Spec.InternalTrafficPolicy = ptr.To(v1.ServiceInternalTrafficPolicyLocal)
 				svc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{{
 					IP: "9.10.11.12",
 				}}
@@ -5443,17 +5140,17 @@ func TestInternalExternalMasquerade(t *testing.T) {
 				eps.Endpoints = []discovery.Endpoint{
 					{
 						Addresses: []string{"10.180.0.1"},
-						NodeName:  pointer.String(testHostname),
+						NodeName:  ptr.To(testHostname),
 					},
 					{
 						Addresses: []string{"10.180.1.1"},
-						NodeName:  pointer.String("remote"),
+						NodeName:  ptr.To("remote"),
 					},
 				}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p80"),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("p80"),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}}
 			}),
 			makeTestEndpointSlice("ns2", "svc2", 1, func(eps *discovery.EndpointSlice) {
@@ -5461,17 +5158,17 @@ func TestInternalExternalMasquerade(t *testing.T) {
 				eps.Endpoints = []discovery.Endpoint{
 					{
 						Addresses: []string{"10.180.0.2"},
-						NodeName:  pointer.String(testHostname),
+						NodeName:  ptr.To(testHostname),
 					},
 					{
 						Addresses: []string{"10.180.1.2"},
-						NodeName:  pointer.String("remote"),
+						NodeName:  ptr.To("remote"),
 					},
 				}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p80"),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("p80"),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}}
 			}),
 			makeTestEndpointSlice("ns3", "svc3", 1, func(eps *discovery.EndpointSlice) {
@@ -5479,17 +5176,17 @@ func TestInternalExternalMasquerade(t *testing.T) {
 				eps.Endpoints = []discovery.Endpoint{
 					{
 						Addresses: []string{"10.180.0.3"},
-						NodeName:  pointer.String(testHostname),
+						NodeName:  ptr.To(testHostname),
 					},
 					{
 						Addresses: []string{"10.180.1.3"},
-						NodeName:  pointer.String("remote"),
+						NodeName:  ptr.To("remote"),
 					},
 				}
 				eps.Ports = []discovery.EndpointPort{{
-					Name:     pointer.String("p80"),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To("p80"),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}}
 			}),
 		)
@@ -5842,31 +5539,31 @@ func TestInternalExternalMasquerade(t *testing.T) {
 				// ClusterIP is assumed to be from a pod, and thus to not
 				// require masquerading.
 				"node to ClusterIP": {
-					masq: pointer.Bool(false),
+					masq: ptr.To(false),
 				},
 				"node to ClusterIP with eTP:Local": {
-					masq: pointer.Bool(false),
+					masq: ptr.To(false),
 				},
 				"node to ClusterIP with iTP:Local": {
-					masq: pointer.Bool(false),
+					masq: ptr.To(false),
 				},
 				"external to ClusterIP": {
-					masq: pointer.Bool(false),
+					masq: ptr.To(false),
 				},
 				"external to ClusterIP with eTP:Local": {
-					masq: pointer.Bool(false),
+					masq: ptr.To(false),
 				},
 				"external to ClusterIP with iTP:Local": {
-					masq: pointer.Bool(false),
+					masq: ptr.To(false),
 				},
 
 				// And there's no eTP:Local short-circuit for pod traffic,
 				// so pods get only the local endpoints.
 				"pod to NodePort with eTP:Local": {
-					output: pointer.String("10.180.0.2:80"),
+					output: ptr.To("10.180.0.2:80"),
 				},
 				"pod to LB with eTP:Local": {
-					output: pointer.String("10.180.0.2:80"),
+					output: ptr.To("10.180.0.2:80"),
 				},
 			},
 		},
@@ -5879,13 +5576,13 @@ func TestInternalExternalMasquerade(t *testing.T) {
 				// All "to ClusterIP" traffic gets masqueraded when using
 				// --masquerade-all.
 				"pod to ClusterIP": {
-					masq: pointer.Bool(true),
+					masq: ptr.To(true),
 				},
 				"pod to ClusterIP with eTP:Local": {
-					masq: pointer.Bool(true),
+					masq: ptr.To(true),
 				},
 				"pod to ClusterIP with iTP:Local": {
-					masq: pointer.Bool(true),
+					masq: ptr.To(true),
 				},
 			},
 		},
@@ -5897,21 +5594,21 @@ func TestInternalExternalMasquerade(t *testing.T) {
 			overrides: map[string]packetFlowTestOverride{
 				// As in "masqueradeAll"
 				"pod to ClusterIP": {
-					masq: pointer.Bool(true),
+					masq: ptr.To(true),
 				},
 				"pod to ClusterIP with eTP:Local": {
-					masq: pointer.Bool(true),
+					masq: ptr.To(true),
 				},
 				"pod to ClusterIP with iTP:Local": {
-					masq: pointer.Bool(true),
+					masq: ptr.To(true),
 				},
 
 				// As in "no LocalTrafficDetector"
 				"pod to NodePort with eTP:Local": {
-					output: pointer.String("10.180.0.2:80"),
+					output: ptr.To("10.180.0.2:80"),
 				},
 				"pod to LB with eTP:Local": {
-					output: pointer.String("10.180.0.2:80"),
+					output: ptr.To("10.180.0.2:80"),
 				},
 			},
 		},
@@ -5923,7 +5620,7 @@ func TestInternalExternalMasquerade(t *testing.T) {
 			fp := NewFakeProxier(ipt)
 			fp.masqueradeAll = tc.masqueradeAll
 			if !tc.localDetector {
-				fp.localDetector = proxyutiliptables.NewNoOpLocalDetector()
+				fp.localDetector = proxyutil.NewNoOpLocalDetector()
 			}
 			setupTest(fp)
 
@@ -6017,9 +5714,9 @@ func TestSyncProxyRulesLargeClusterMode(t *testing.T) {
 				eps.Endpoints[i].Addresses = []string{fmt.Sprintf("10.0.%d.%d", i%256, i/256)}
 			}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		makeTestEndpointSlice("ns2", "svc2", 1, func(eps *discovery.EndpointSlice) {
@@ -6029,9 +5726,9 @@ func TestSyncProxyRulesLargeClusterMode(t *testing.T) {
 				eps.Endpoints[i].Addresses = []string{fmt.Sprintf("10.1.%d.%d", i%256, i/256)}
 			}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p8080"),
-				Port:     pointer.Int32(8080),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p8080"),
+				Port:     ptr.To[int32](8080),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -6058,9 +5755,9 @@ func TestSyncProxyRulesLargeClusterMode(t *testing.T) {
 			Addresses: []string{"203.0.113.12"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p8081"),
-			Port:     pointer.Int32(8081),
-			Protocol: &tcpProtocol,
+			Name:     ptr.To("p8081"),
+			Port:     ptr.To[int32](8081),
+			Protocol: ptr.To(v1.ProtocolTCP),
 		}}
 	}))
 	fp.syncProxyRules()
@@ -6110,9 +5807,9 @@ func TestSyncProxyRulesLargeClusterMode(t *testing.T) {
 			Addresses: []string{"10.4.0.1"},
 		}}
 		eps.Ports = []discovery.EndpointPort{{
-			Name:     pointer.String("p8082"),
-			Port:     pointer.Int32(8082),
-			Protocol: &tcpProtocol,
+			Name:     ptr.To("p8082"),
+			Port:     ptr.To[int32](8082),
+			Protocol: ptr.To(v1.ProtocolTCP),
 		}}
 	}))
 	fp.syncProxyRules()
@@ -6160,9 +5857,11 @@ func TestSyncProxyRulesLargeClusterMode(t *testing.T) {
 
 // Test calling syncProxyRules() multiple times with various changes
 func TestSyncProxyRulesRepeated(t *testing.T) {
+	logger, _ := klogtesting.NewTestContext(t)
 	ipt := iptablestest.NewFake()
 	fp := NewFakeProxier(ipt)
-	metrics.RegisterMetrics()
+	metrics.RegisterMetrics(kubeproxyconfig.ProxyModeIPTables)
+	defer legacyregistry.Reset()
 
 	// Create initial state
 	var svc2 *v1.Service
@@ -6196,9 +5895,9 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 				Addresses: []string{"10.0.1.1"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 		makeTestEndpointSlice("ns2", "svc2", 1, func(eps *discovery.EndpointSlice) {
@@ -6207,9 +5906,9 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 				Addresses: []string{"10.0.2.1"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p8080"),
-				Port:     pointer.Int32(8080),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p8080"),
+				Port:     ptr.To[int32](8080),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -6225,7 +5924,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6257,14 +5956,14 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), true, expected, fp.iptablesData.String())
 
-	rulesSynced := countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric := countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced := countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric := countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
 
 	rulesTotal := rulesSynced
-	rulesTotalMetric := countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric := countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6291,9 +5990,9 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 				Addresses: []string{"10.0.3.1"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -6308,7 +6007,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6335,8 +6034,8 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
@@ -6344,7 +6043,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	// We added 1 KUBE-SERVICES rule, 2 KUBE-SVC-X27LE4BHSL4DOUIK rules, and 2
 	// KUBE-SEP-BSWRHOQ77KEXZLNL rules.
 	rulesTotal += 5
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6362,7 +6061,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6386,8 +6085,8 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
@@ -6395,7 +6094,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	// We deleted 1 KUBE-SERVICES rule, 2 KUBE-SVC-2VJB64SDSIJUP5T6 rules, and 2
 	// KUBE-SEP-UHEGFW77JX3KXTOV rules
 	rulesTotal -= 5
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6426,7 +6125,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-SERVICES -m comment --comment "ns4/svc4:p80 has no endpoints" -m tcp -p tcp -d 172.30.0.44 --dport 80 -j REJECT
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6446,15 +6145,15 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
 
 	// The REJECT rule is in "filter", not NAT, so the number of NAT rules hasn't
 	// changed.
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6466,9 +6165,9 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 				Addresses: []string{"10.0.4.1"},
 			}}
 			eps.Ports = []discovery.EndpointPort{{
-				Name:     pointer.String("p80"),
-				Port:     pointer.Int32(80),
-				Protocol: &tcpProtocol,
+				Name:     ptr.To("p80"),
+				Port:     ptr.To[int32](80),
+				Protocol: ptr.To(v1.ProtocolTCP),
 			}}
 		}),
 	)
@@ -6482,7 +6181,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6509,8 +6208,8 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
@@ -6518,7 +6217,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	// We added 1 KUBE-SERVICES rule, 2 KUBE-SVC-4SW47YFZTEDKD3PK rules, and
 	// 2 KUBE-SEP-AYCN5HPXMIRJNJXU rules
 	rulesTotal += 5
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6539,7 +6238,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6568,14 +6267,14 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
 
 	// We rewrote existing rules but did not change the overall number of rules.
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6595,7 +6294,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6626,8 +6325,8 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
@@ -6636,7 +6335,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	// jumping to the new SEP chain. The other rules related to svc3 got rewritten,
 	// but that does not change the count of rules.
 	rulesTotal += 3
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6653,7 +6352,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6674,14 +6373,14 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
 
 	// (No changes)
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6690,11 +6389,11 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	if fp.needFullSync {
 		t.Fatalf("Proxier unexpectedly already needs a full sync?")
 	}
-	prFailures, err := testutil.GetCounterMetricValue(metrics.IptablesPartialRestoreFailuresTotal)
+	partialRestoreFailures, err := testutil.GetCounterMetricValue(metrics.IPTablesPartialRestoreFailuresTotal)
 	if err != nil {
 		t.Fatalf("Could not get partial restore failures metric: %v", err)
 	}
-	if prFailures != 0.0 {
+	if partialRestoreFailures != 0.0 {
 		t.Errorf("Already did a partial resync? Something failed earlier!")
 	}
 
@@ -6724,12 +6423,12 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	if !fp.needFullSync {
 		t.Errorf("Proxier did not fail on previous partial resync?")
 	}
-	updatedPRFailures, err := testutil.GetCounterMetricValue(metrics.IptablesPartialRestoreFailuresTotal)
+	updatedPartialRestoreFailures, err := testutil.GetCounterMetricValue(metrics.IPTablesPartialRestoreFailuresTotal)
 	if err != nil {
 		t.Errorf("Could not get partial restore failures metric: %v", err)
 	}
-	if updatedPRFailures != prFailures+1.0 {
-		t.Errorf("Partial restore failures metric was not incremented after failed partial resync (expected %.02f, got %.02f)", prFailures+1.0, updatedPRFailures)
+	if updatedPartialRestoreFailures != partialRestoreFailures+1.0 {
+		t.Errorf("Partial restore failures metric was not incremented after failed partial resync (expected %.02f, got %.02f)", partialRestoreFailures+1.0, updatedPartialRestoreFailures)
 	}
 
 	// On retry we should do a full resync, which should succeed (and delete svc4)
@@ -6744,7 +6443,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		:KUBE-FORWARD - [0:0]
 		:KUBE-PROXY-FIREWALL - [0:0]
 		-A KUBE-FIREWALL -m comment --comment "block incoming localnet connections" -d 127.0.0.0/8 ! -s 127.0.0.0/8 -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
-		-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+		-A KUBE-FORWARD -m conntrack --ctstate INVALID -m nfacct --nfacct-name ct_state_invalid_dropped_pkts -j DROP
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
 		-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 		COMMIT
@@ -6784,8 +6483,8 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		`)
 	assertIPTablesRulesEqual(t, getLine(), false, expected, fp.iptablesData.String())
 
-	rulesSynced = countRules(utiliptables.TableNAT, expected)
-	rulesSyncedMetric = countRulesFromLastSyncMetric(utiliptables.TableNAT)
+	rulesSynced = countRules(logger, utiliptables.TableNAT, expected)
+	rulesSyncedMetric = countRulesFromLastSyncMetric(logger, utiliptables.TableNAT)
 	if rulesSyncedMetric != rulesSynced {
 		t.Errorf("metric shows %d rules synced but iptables data shows %d", rulesSyncedMetric, rulesSynced)
 	}
@@ -6793,7 +6492,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 	// We deleted 1 KUBE-SERVICES rule, 2 KUBE-SVC-4SW47YFZTEDKD3PK rules, and 2
 	// KUBE-SEP-AYCN5HPXMIRJNJXU rules
 	rulesTotal -= 5
-	rulesTotalMetric = countRulesFromMetric(utiliptables.TableNAT)
+	rulesTotalMetric = countRulesFromMetric(logger, utiliptables.TableNAT)
 	if rulesTotalMetric != rulesTotal {
 		t.Errorf("metric shows %d rules total but expected %d", rulesTotalMetric, rulesTotal)
 	}
@@ -6805,10 +6504,7 @@ func TestNoEndpointsMetric(t *testing.T) {
 		hostname string
 	}
 
-	internalTrafficPolicyLocal := v1.ServiceInternalTrafficPolicyLocal
-	externalTrafficPolicyLocal := v1.ServiceExternalTrafficPolicyLocal
-
-	metrics.RegisterMetrics()
+	metrics.RegisterMetrics(kubeproxyconfig.ProxyModeIPTables)
 	testCases := []struct {
 		name                                                string
 		internalTrafficPolicy                               *v1.ServiceInternalTrafficPolicy
@@ -6819,7 +6515,7 @@ func TestNoEndpointsMetric(t *testing.T) {
 	}{
 		{
 			name:                  "internalTrafficPolicy is set and there are local endpoints",
-			internalTrafficPolicy: &internalTrafficPolicyLocal,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
 			endpoints: []endpoint{
 				{"10.0.1.1", testHostname},
 				{"10.0.1.2", "host1"},
@@ -6828,7 +6524,7 @@ func TestNoEndpointsMetric(t *testing.T) {
 		},
 		{
 			name:                  "externalTrafficPolicy is set and there are local endpoints",
-			externalTrafficPolicy: externalTrafficPolicyLocal,
+			externalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
 			endpoints: []endpoint{
 				{"10.0.1.1", testHostname},
 				{"10.0.1.2", "host1"},
@@ -6837,8 +6533,8 @@ func TestNoEndpointsMetric(t *testing.T) {
 		},
 		{
 			name:                  "both policies are set and there are local endpoints",
-			internalTrafficPolicy: &internalTrafficPolicyLocal,
-			externalTrafficPolicy: externalTrafficPolicyLocal,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
+			externalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
 			endpoints: []endpoint{
 				{"10.0.1.1", testHostname},
 				{"10.0.1.2", "host1"},
@@ -6847,7 +6543,7 @@ func TestNoEndpointsMetric(t *testing.T) {
 		},
 		{
 			name:                  "internalTrafficPolicy is set and there are no local endpoints",
-			internalTrafficPolicy: &internalTrafficPolicyLocal,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
 			endpoints: []endpoint{
 				{"10.0.1.1", "host0"},
 				{"10.0.1.2", "host1"},
@@ -6857,7 +6553,7 @@ func TestNoEndpointsMetric(t *testing.T) {
 		},
 		{
 			name:                  "externalTrafficPolicy is set and there are no local endpoints",
-			externalTrafficPolicy: externalTrafficPolicyLocal,
+			externalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
 			endpoints: []endpoint{
 				{"10.0.1.1", "host0"},
 				{"10.0.1.2", "host1"},
@@ -6867,8 +6563,8 @@ func TestNoEndpointsMetric(t *testing.T) {
 		},
 		{
 			name:                  "both policies are set and there are no local endpoints",
-			internalTrafficPolicy: &internalTrafficPolicyLocal,
-			externalTrafficPolicy: externalTrafficPolicyLocal,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
+			externalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
 			endpoints: []endpoint{
 				{"10.0.1.1", "host0"},
 				{"10.0.1.2", "host1"},
@@ -6879,8 +6575,8 @@ func TestNoEndpointsMetric(t *testing.T) {
 		},
 		{
 			name:                  "both policies are set and there are no endpoints at all",
-			internalTrafficPolicy: &internalTrafficPolicyLocal,
-			externalTrafficPolicy: externalTrafficPolicyLocal,
+			internalTrafficPolicy: ptr.To(v1.ServiceInternalTrafficPolicyLocal),
+			externalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
 			endpoints:             []endpoint{},
 			expectedSyncProxyRulesNoLocalEndpointsTotalInternal: 0,
 			expectedSyncProxyRulesNoLocalEndpointsTotalExternal: 0,
@@ -6922,17 +6618,17 @@ func TestNoEndpointsMetric(t *testing.T) {
 					Labels:    map[string]string{discovery.LabelServiceName: serviceName},
 				},
 				Ports: []discovery.EndpointPort{{
-					Name:     pointer.String(""),
-					Port:     pointer.Int32(80),
-					Protocol: &tcpProtocol,
+					Name:     ptr.To(""),
+					Port:     ptr.To[int32](80),
+					Protocol: ptr.To(v1.ProtocolTCP),
 				}},
 				AddressType: discovery.AddressTypeIPv4,
 			}
 			for _, ep := range tc.endpoints {
 				endpointSlice.Endpoints = append(endpointSlice.Endpoints, discovery.Endpoint{
 					Addresses:  []string{ep.ip},
-					Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
-					NodeName:   pointer.String(ep.hostname),
+					Conditions: discovery.EndpointConditions{Ready: ptr.To(true)},
+					NodeName:   ptr.To(ep.hostname),
 				})
 			}
 
@@ -6960,9 +6656,6 @@ func TestNoEndpointsMetric(t *testing.T) {
 }
 
 func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
-	ipModeProxy := v1.LoadBalancerIPModeProxy
-	ipModeVIP := v1.LoadBalancerIPModeVIP
-
 	testCases := []struct {
 		name          string
 		ipModeEnabled bool
@@ -6977,7 +6670,7 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 			ipModeEnabled: false,
 			svcIP:         "10.20.30.41",
 			svcLBIP:       "1.2.3.4",
-			ipMode:        &ipModeProxy,
+			ipMode:        ptr.To(v1.LoadBalancerIPModeProxy),
 			expectedRule:  true,
 		},
 		{
@@ -6985,7 +6678,7 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 			ipModeEnabled: false,
 			svcIP:         "10.20.30.42",
 			svcLBIP:       "1.2.3.5",
-			ipMode:        &ipModeVIP,
+			ipMode:        ptr.To(v1.LoadBalancerIPModeVIP),
 			expectedRule:  true,
 		},
 		{
@@ -7002,7 +6695,7 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 			ipModeEnabled: true,
 			svcIP:         "10.20.30.41",
 			svcLBIP:       "1.2.3.4",
-			ipMode:        &ipModeProxy,
+			ipMode:        ptr.To(v1.LoadBalancerIPModeProxy),
 			expectedRule:  false,
 		},
 		{
@@ -7010,7 +6703,7 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 			ipModeEnabled: true,
 			svcIP:         "10.20.30.42",
 			svcLBIP:       "1.2.3.5",
-			ipMode:        &ipModeVIP,
+			ipMode:        ptr.To(v1.LoadBalancerIPModeVIP),
 			expectedRule:  true,
 		},
 		{
@@ -7033,7 +6726,7 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LoadBalancerIPMode, testCase.ipModeEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LoadBalancerIPMode, testCase.ipModeEnabled)
 			ipt := iptablestest.NewFake()
 			fp := NewFakeProxier(ipt)
 			makeServiceMap(fp,
@@ -7053,7 +6746,6 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 				}),
 			)
 
-			tcpProtocol := v1.ProtocolTCP
 			populateEndpointSlices(fp,
 				makeTestEndpointSlice("ns1", "svc1", 1, func(eps *discovery.EndpointSlice) {
 					eps.AddressType = discovery.AddressTypeIPv4
@@ -7061,9 +6753,9 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 						Addresses: []string{"10.180.0.1"},
 					}}
 					eps.Ports = []discovery.EndpointPort{{
-						Name:     pointer.String("p80"),
-						Port:     pointer.Int32(80),
-						Protocol: &tcpProtocol,
+						Name:     ptr.To("p80"),
+						Port:     ptr.To[int32](80),
+						Protocol: ptr.To(v1.ProtocolTCP),
 					}}
 				}),
 			)

@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -37,7 +38,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = sigDescribe("[Feature:Windows] Kubelet-Stats [Serial]", skipUnlessWindows(func() {
+var _ = sigDescribe(feature.Windows, "Kubelet-Stats", framework.WithSerial(), skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("kubelet-stats-test-windows-serial")
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
@@ -59,7 +60,7 @@ var _ = sigDescribe("[Feature:Windows] Kubelet-Stats [Serial]", skipUnlessWindow
 
 				ginkgo.By("Waiting up to 3 minutes for pods to be running")
 				timeout := 3 * time.Minute
-				err = e2epod.WaitForPodsRunningReady(ctx, f.ClientSet, f.Namespace.Name, 10, 0, timeout)
+				err = e2epod.WaitForPodsRunningReady(ctx, f.ClientSet, f.Namespace.Name, 10, timeout)
 				framework.ExpectNoError(err)
 
 				ginkgo.By("Getting kubelet stats 5 times and checking average duration")
@@ -115,7 +116,7 @@ var _ = sigDescribe("[Feature:Windows] Kubelet-Stats [Serial]", skipUnlessWindow
 	})
 }))
 
-var _ = sigDescribe("[Feature:Windows] Kubelet-Stats", skipUnlessWindows(func() {
+var _ = sigDescribe(feature.Windows, "Kubelet-Stats", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("kubelet-stats-test-windows")
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
@@ -151,7 +152,7 @@ var _ = sigDescribe("[Feature:Windows] Kubelet-Stats", skipUnlessWindows(func() 
 
 				ginkgo.By("Waiting up to 3 minutes for pods to be running")
 				timeout := 3 * time.Minute
-				err = e2epod.WaitForPodsRunningReady(ctx, f.ClientSet, f.Namespace.Name, 3, 0, timeout)
+				err = e2epod.WaitForPodsRunningReady(ctx, f.ClientSet, f.Namespace.Name, 3, timeout)
 				framework.ExpectNoError(err)
 
 				ginkgo.By("Getting kubelet stats 1 time")
@@ -226,7 +227,7 @@ func findWindowsNode(ctx context.Context, f *framework.Framework) (v1.Node, erro
 		}
 	}
 
-	if foundNode == false {
+	if !foundNode {
 		e2eskipper.Skipf("Could not find and ready and schedulable Windows nodes")
 	}
 

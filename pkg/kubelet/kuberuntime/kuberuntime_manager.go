@@ -44,6 +44,7 @@ import (
 	"k8s.io/component-base/logs/logreduction"
 	internalapi "k8s.io/cri-api/pkg/apis"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/credentialprovider"
@@ -69,8 +70,6 @@ import (
 const (
 	// The api version of kubelet runtime api
 	kubeRuntimeAPIVersion = "0.1.0"
-	// The root directory for pod logs
-	podLogsRootDirectory = "/var/log/pods"
 	// A minimal shutdown window for avoiding unnecessary SIGKILLs
 	minimumGracePeriodInSeconds = 2
 
@@ -168,6 +167,9 @@ type kubeGenericRuntimeManager struct {
 
 	// Memory throttling factor for MemoryQoS
 	memoryThrottlingFactor float64
+
+	// Root directory used to store pod logs
+	podLogsDirectory string
 }
 
 // KubeGenericRuntime is a interface contains interfaces for container runtime and command.
@@ -184,6 +186,7 @@ func NewKubeGenericRuntimeManager(
 	readinessManager proberesults.Manager,
 	startupManager proberesults.Manager,
 	rootDirectory string,
+	podLogsDirectory string,
 	machineInfo *cadvisorapi.MachineInfo,
 	podStateProvider podStateProvider,
 	osInterface kubecontainer.OSInterface,
@@ -236,6 +239,7 @@ func NewKubeGenericRuntimeManager(
 		memorySwapBehavior:     memorySwapBehavior,
 		getNodeAllocatable:     getNodeAllocatable,
 		memoryThrottlingFactor: memoryThrottlingFactor,
+		podLogsDirectory:       podLogsDirectory,
 	}
 
 	typedVersion, err := kubeRuntimeManager.getTypedVersion(ctx)
@@ -258,15 +262,6 @@ func NewKubeGenericRuntimeManager(
 		"containerRuntime", typedVersion.RuntimeName,
 		"version", typedVersion.RuntimeVersion,
 		"apiVersion", typedVersion.RuntimeApiVersion)
-
-	// If the container logs directory does not exist, create it.
-	// TODO: create podLogsRootDirectory at kubelet.go when kubelet is refactored to
-	// new runtime interface
-	if _, err := osInterface.Stat(podLogsRootDirectory); os.IsNotExist(err) {
-		if err := osInterface.MkdirAll(podLogsRootDirectory, 0755); err != nil {
-			klog.ErrorS(err, "Failed to create pod log directory", "path", podLogsRootDirectory)
-		}
-	}
 
 	if imageCredentialProviderConfigFile != "" || imageCredentialProviderBinDir != "" {
 		if err := plugin.RegisterCredentialProviderPlugins(imageCredentialProviderConfigFile, imageCredentialProviderBinDir); err != nil {
@@ -352,7 +347,7 @@ func (m *kubeGenericRuntimeManager) Status(ctx context.Context) (*kubecontainer.
 	if resp.GetStatus() == nil {
 		return nil, errors.New("runtime status is nil")
 	}
-	return toKubeRuntimeStatus(resp.GetStatus()), nil
+	return toKubeRuntimeStatus(resp.GetStatus(), resp.GetRuntimeHandlers()), nil
 }
 
 // GetPods returns a list of containers grouped by pods. The boolean parameter
@@ -523,6 +518,10 @@ func (p podActions) String() string {
 		p.KillPod, p.CreateSandbox, p.UpdatePodResources, p.Attempt, p.InitContainersToStart, p.ContainersToStart, p.EphemeralContainersToStart, p.ContainersToUpdate, p.ContainersToKill)
 }
 
+// containerChanged will determine whether the container has changed based on the fields that will affect the running of the container.
+// Currently, there are only `image` and `name` fields.
+// we don't need to consider the pod UID here, because we find the containerStatus through the pod UID.
+// If the pod UID changes, we will not be able to find the containerStatus to compare against.
 func containerChanged(container *v1.Container, containerStatus *kubecontainer.Status) (uint64, uint64, bool) {
 	expectedHash := kubecontainer.HashContainer(container)
 	return expectedHash, containerStatus.Hash, containerStatus.Hash != expectedHash
@@ -676,7 +675,7 @@ func (m *kubeGenericRuntimeManager) doPodResizeAction(pod *v1.Pod, podStatus *ku
 		switch rName {
 		case v1.ResourceCPU:
 			podCpuResources := &cm.ResourceConfig{CPUPeriod: podResources.CPUPeriod}
-			if setLimitValue == true {
+			if setLimitValue {
 				podCpuResources.CPUQuota = podResources.CPUQuota
 			} else {
 				podCpuResources.CPUShares = podResources.CPUShares
@@ -986,10 +985,7 @@ func (m *kubeGenericRuntimeManager) computePodActions(ctx context.Context, pod *
 		var message string
 		var reason containerKillReason
 		restart := shouldRestartOnFailure(pod)
-		// Do not restart if only the Resources field has changed with InPlacePodVerticalScaling enabled
-		if _, _, changed := containerChanged(&container, containerStatus); changed &&
-			(!isInPlacePodVerticalScalingAllowed(pod) ||
-				kubecontainer.HashContainerWithoutResources(&container) != containerStatus.HashWithoutResources) {
+		if _, _, changed := containerChanged(&container, containerStatus); changed {
 			message = fmt.Sprintf("Container %s definition changed", container.Name)
 			// Restart regardless of the restart policy because the container
 			// spec changed.
@@ -1090,7 +1086,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(ctx context.Context, pod *v1.Pod, po
 			klog.V(3).InfoS("Killing unwanted container for pod", "containerName", containerInfo.name, "containerID", containerID, "pod", klog.KObj(pod))
 			killContainerResult := kubecontainer.NewSyncResult(kubecontainer.KillContainer, containerInfo.name)
 			result.AddSyncResult(killContainerResult)
-			if err := m.killContainer(ctx, pod, containerID, containerInfo.name, containerInfo.message, containerInfo.reason, nil); err != nil {
+			if err := m.killContainer(ctx, pod, containerID, containerInfo.name, containerInfo.message, containerInfo.reason, nil, nil); err != nil {
 				killContainerResult.Fail(kubecontainer.ErrKillContainer, err.Error())
 				klog.ErrorS(err, "killContainer for pod failed", "containerName", containerInfo.name, "containerID", containerID, "pod", klog.KObj(pod))
 				return
