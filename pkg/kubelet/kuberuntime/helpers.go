@@ -172,10 +172,10 @@ func isInitContainerFailed(status *kubecontainer.Status) bool {
 	return false
 }
 
-// getStableKey generates a key (string) to uniquely identify a
+// GetStableKey generates a key (string) to uniquely identify a
 // (pod, container) tuple. The key should include the content of the
 // container, so that any change to the container generates a new key.
-func getStableKey(pod *v1.Pod, container *v1.Container) string {
+func GetStableKey(pod *v1.Pod, container *v1.Container) string {
 	hash := strconv.FormatUint(kubecontainer.HashContainer(container), 16)
 	return fmt.Sprintf("%s_%s_%s_%s_%s", pod.Name, pod.Namespace, string(pod.UID), container.Name, hash)
 }
@@ -208,7 +208,7 @@ func parsePodUIDFromLogsDirectory(name string) types.UID {
 }
 
 // toKubeRuntimeStatus converts the runtimeapi.RuntimeStatus to kubecontainer.RuntimeStatus.
-func toKubeRuntimeStatus(status *runtimeapi.RuntimeStatus, handlers []*runtimeapi.RuntimeHandler) *kubecontainer.RuntimeStatus {
+func toKubeRuntimeStatus(status *runtimeapi.RuntimeStatus, handlers []*runtimeapi.RuntimeHandler, features *runtimeapi.RuntimeFeatures) *kubecontainer.RuntimeStatus {
 	conditions := []kubecontainer.RuntimeCondition{}
 	for _, c := range status.GetConditions() {
 		conditions = append(conditions, kubecontainer.RuntimeCondition{
@@ -232,7 +232,13 @@ func toKubeRuntimeStatus(status *runtimeapi.RuntimeStatus, handlers []*runtimeap
 			SupportsUserNamespaces:          supportsUserns,
 		}
 	}
-	return &kubecontainer.RuntimeStatus{Conditions: conditions, Handlers: retHandlers}
+	var retFeatures *kubecontainer.RuntimeFeatures
+	if features != nil {
+		retFeatures = &kubecontainer.RuntimeFeatures{
+			SupplementalGroupsPolicy: features.SupplementalGroupsPolicy,
+		}
+	}
+	return &kubecontainer.RuntimeStatus{Conditions: conditions, Handlers: retHandlers, Features: retFeatures}
 }
 
 func fieldSeccompProfile(scmp *v1.SeccompProfile, profileRootPath string, fallbackToRuntimeDefault bool) (*runtimeapi.SecurityProfile, error) {

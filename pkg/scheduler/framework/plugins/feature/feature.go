@@ -20,12 +20,14 @@ package feature
 // This struct allows us to break the dependency of the plugins on
 // the internal k8s features pkg.
 type Features struct {
+	EnableDRAAdminAccess                         bool
 	EnableDynamicResourceAllocation              bool
 	EnableVolumeCapacityPriority                 bool
 	EnableNodeInclusionPolicyInPodTopologySpread bool
 	EnableMatchLabelKeysInPodTopologySpread      bool
-	EnablePodDisruptionConditions                bool
 	EnableInPlacePodVerticalScaling              bool
 	EnableSidecarContainers                      bool
 	EnableSchedulingQueueHint                    bool
+	EnableAsyncPreemption                        bool
+	EnablePodLevelResources                      bool
 }

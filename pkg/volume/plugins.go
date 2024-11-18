@@ -17,12 +17,12 @@ limitations under the License.
 package volume
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
 
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
 	"k8s.io/utils/exec"
@@ -61,6 +61,8 @@ const (
 	ProbeAddOrUpdate ProbeOperation = 1 << iota
 	ProbeRemove
 )
+
+var ErrNoPluiginMatched = errors.New("no volume plugin matched")
 
 // VolumeOptions contains option information about a volume.
 type VolumeOptions struct {
@@ -149,7 +151,7 @@ type VolumePlugin interface {
 	// Ownership of the spec pointer in *not* transferred.
 	// - spec: The v1.Volume spec
 	// - pod: The enclosing pod
-	NewMounter(spec *Spec, podRef *v1.Pod, opts VolumeOptions) (Mounter, error)
+	NewMounter(spec *Spec, podRef *v1.Pod) (Mounter, error)
 
 	// NewUnmounter creates a new volume.Unmounter from recoverable state.
 	// - name: The volume name, as per the v1.Volume spec.
@@ -260,7 +262,7 @@ type BlockVolumePlugin interface {
 	// Ownership of the spec pointer in *not* transferred.
 	// - spec: The v1.Volume spec
 	// - pod: The enclosing pod
-	NewBlockVolumeMapper(spec *Spec, podRef *v1.Pod, opts VolumeOptions) (BlockVolumeMapper, error)
+	NewBlockVolumeMapper(spec *Spec, podRef *v1.Pod) (BlockVolumeMapper, error)
 	// NewBlockVolumeUnmapper creates a new volume.BlockVolumeUnmapper from recoverable state.
 	// - name: The volume name, as per the v1.Volume spec.
 	// - podUID: The UID of the enclosing pod
@@ -306,15 +308,18 @@ type KubeletVolumeHost interface {
 	GetTrustAnchorsBySigner(signerName string, labelSelector *metav1.LabelSelector, allowMissing bool) ([]byte, error)
 }
 
+// CSIDriverVolumeHost is a volume host that has access to CSIDriverLister
+type CSIDriverVolumeHost interface {
+	// CSIDriverLister returns the informer lister for the CSIDriver API Object
+	CSIDriverLister() storagelistersv1.CSIDriverLister
+}
+
 // AttachDetachVolumeHost is a AttachDetach Controller specific interface that plugins can use
 // to access methods on the Attach Detach Controller.
 type AttachDetachVolumeHost interface {
+	CSIDriverVolumeHost
 	// CSINodeLister returns the informer lister for the CSINode API Object
 	CSINodeLister() storagelistersv1.CSINodeLister
-
-	// CSIDriverLister returns the informer lister for the CSIDriver API Object
-	CSIDriverLister() storagelistersv1.CSIDriverLister
-
 	// VolumeAttachmentLister returns the informer lister for the VolumeAttachment API Object
 	VolumeAttachmentLister() storagelistersv1.VolumeAttachmentLister
 	// IsAttachDetachController is an interface marker to strictly tie AttachDetachVolumeHost
@@ -365,7 +370,7 @@ type VolumeHost interface {
 	// the provided spec.  This is used to implement volume plugins which
 	// "wrap" other plugins.  For example, the "secret" volume is
 	// implemented in terms of the "emptyDir" volume.
-	NewWrapperMounter(volName string, spec Spec, pod *v1.Pod, opts VolumeOptions) (Mounter, error)
+	NewWrapperMounter(volName string, spec Spec, pod *v1.Pod) (Mounter, error)
 
 	// NewWrapperUnmounter finds an appropriate plugin with which to handle
 	// the provided spec.  See comments on NewWrapperMounter for more
@@ -414,12 +419,11 @@ type VolumeHost interface {
 
 // VolumePluginMgr tracks registered plugins.
 type VolumePluginMgr struct {
-	mutex                     sync.RWMutex
-	plugins                   map[string]VolumePlugin
-	prober                    DynamicPluginProber
-	probedPlugins             map[string]VolumePlugin
-	loggedDeprecationWarnings sets.Set[string]
-	Host                      VolumeHost
+	mutex         sync.RWMutex
+	plugins       map[string]VolumePlugin
+	prober        DynamicPluginProber
+	probedPlugins map[string]VolumePlugin
+	Host          VolumeHost
 }
 
 // Spec is an internal representation of a volume.  All API volume types translate to Spec.
@@ -560,7 +564,6 @@ func (pm *VolumePluginMgr) InitPlugins(plugins []VolumePlugin, prober DynamicPlu
 	defer pm.mutex.Unlock()
 
 	pm.Host = host
-	pm.loggedDeprecationWarnings = sets.New[string]()
 
 	if prober == nil {
 		// Use a dummy prober to prevent nil deference.
@@ -602,6 +605,7 @@ func (pm *VolumePluginMgr) InitPlugins(plugins []VolumePlugin, prober DynamicPlu
 		pm.plugins[name] = plugin
 		klog.V(1).InfoS("Loaded volume plugin", "pluginName", name)
 	}
+	pm.refreshProbedPlugins()
 	return utilerrors.NewAggregate(allErrs)
 }
 
@@ -649,7 +653,7 @@ func (pm *VolumePluginMgr) FindPluginBySpec(spec *Spec) (VolumePlugin, error) {
 	}
 
 	if len(matchedPluginNames) == 0 {
-		return nil, fmt.Errorf("no volume plugin matched")
+		return nil, ErrNoPluiginMatched
 	}
 	if len(matchedPluginNames) > 1 {
 		return nil, fmt.Errorf("multiple volume plugins matched: %s", strings.Join(matchedPluginNames, ","))
@@ -791,19 +795,6 @@ func (pm *VolumePluginMgr) FindDeletablePluginByName(name string) (DeletableVolu
 	return nil, fmt.Errorf("no deletable volume plugin matched")
 }
 
-// FindCreatablePluginBySpec fetches a persistent volume plugin by name.  If
-// no plugin is found, returns error.
-func (pm *VolumePluginMgr) FindCreatablePluginBySpec(spec *Spec) (ProvisionableVolumePlugin, error) {
-	volumePlugin, err := pm.FindPluginBySpec(spec)
-	if err != nil {
-		return nil, err
-	}
-	if provisionableVolumePlugin, ok := volumePlugin.(ProvisionableVolumePlugin); ok {
-		return provisionableVolumePlugin, nil
-	}
-	return nil, fmt.Errorf("no creatable volume plugin matched")
-}
-
 // FindAttachablePluginBySpec fetches a persistent volume plugin by spec.
 // Unlike the other "FindPlugin" methods, this does not return error if no
 // plugin is found.  All volumes require a mounter and unmounter, but not
@@ -875,6 +866,9 @@ func (pm *VolumePluginMgr) FindExpandablePluginBySpec(spec *Spec) (ExpandableVol
 			// returns success for expand on the controller
 			klog.V(4).InfoS("FindExpandablePluginBySpec -> returning noopExpandableVolumePluginInstance", "specName", spec.Name())
 			return &noopExpandableVolumePluginInstance{spec}, nil
+		}
+		if errors.Is(err, ErrNoPluiginMatched) {
+			return nil, nil
 		}
 		klog.V(4).InfoS("FindExpandablePluginBySpec -> err", "specName", spec.Name(), "err", err)
 		return nil, err
@@ -997,7 +991,7 @@ func NewPersistentVolumeRecyclerPodTemplate() *v1.Pod {
 			Containers: []v1.Container{
 				{
 					Name:    "pv-recycler",
-					Image:   "registry.k8s.io/build-image/debian-base:bookworm-v1.0.3",
+					Image:   "registry.k8s.io/build-image/debian-base:bookworm-v1.0.4",
 					Command: []string{"/bin/sh"},
 					Args:    []string{"-c", "test -e /scrub && find /scrub -mindepth 1 -delete && test -z \"$(ls -A /scrub)\" || exit 1"},
 					VolumeMounts: []v1.VolumeMount{

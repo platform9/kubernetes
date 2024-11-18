@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	batch "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
@@ -230,10 +231,9 @@ func TestCalculateSucceededIndexes(t *testing.T) {
 func TestIsIndexFailed(t *testing.T) {
 	logger, _ := ktesting.NewTestContext(t)
 	cases := map[string]struct {
-		enableJobPodFailurePolicy bool
-		job                       batch.Job
-		pod                       *v1.Pod
-		wantResult                bool
+		job        batch.Job
+		pod        *v1.Pod
+		wantResult bool
 	}{
 		"failed pod exceeding backoffLimitPerIndex, when backoffLimitPerIndex=0": {
 			job: batch.Job{
@@ -255,8 +255,7 @@ func TestIsIndexFailed(t *testing.T) {
 			pod:        buildPod().indexFailureCount("1").phase(v1.PodFailed).index("1").trackingFinalizer().Pod,
 			wantResult: true,
 		},
-		"matching FailIndex pod failure policy; JobPodFailurePolicy enabled": {
-			enableJobPodFailurePolicy: true,
+		"matching FailIndex pod failure policy": {
 			job: batch.Job{
 				Spec: batch.JobSpec{
 					Completions:          ptr.To[int32](2),
@@ -288,44 +287,10 @@ func TestIsIndexFailed(t *testing.T) {
 			}).index("0").trackingFinalizer().Pod,
 			wantResult: true,
 		},
-		"matching FailIndex pod failure policy; JobPodFailurePolicy disabled": {
-			enableJobPodFailurePolicy: false,
-			job: batch.Job{
-				Spec: batch.JobSpec{
-					Completions:          ptr.To[int32](2),
-					BackoffLimitPerIndex: ptr.To[int32](1),
-					PodFailurePolicy: &batch.PodFailurePolicy{
-						Rules: []batch.PodFailurePolicyRule{
-							{
-								Action: batch.PodFailurePolicyActionFailIndex,
-								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
-									Values:   []int32{3},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: buildPod().indexFailureCount("0").status(v1.PodStatus{
-				Phase: v1.PodFailed,
-				ContainerStatuses: []v1.ContainerStatus{
-					{
-						State: v1.ContainerState{
-							Terminated: &v1.ContainerStateTerminated{
-								ExitCode: 3,
-							},
-						},
-					},
-				},
-			}).index("0").trackingFinalizer().Pod,
-			wantResult: false,
-		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, true)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodFailurePolicy, tc.enableJobPodFailurePolicy)
 			gotResult := isIndexFailed(logger, &tc.job, tc.pod)
 			if diff := cmp.Diff(tc.wantResult, gotResult); diff != "" {
 				t.Errorf("Unexpected result (-want,+got):\n%s", diff)
@@ -337,11 +302,10 @@ func TestIsIndexFailed(t *testing.T) {
 func TestCalculateFailedIndexes(t *testing.T) {
 	logger, _ := ktesting.NewTestContext(t)
 	cases := map[string]struct {
-		enableJobPodFailurePolicy bool
-		job                       batch.Job
-		pods                      []*v1.Pod
-		wantPrevFailedIndexes     orderedIntervals
-		wantFailedIndexes         orderedIntervals
+		job                   batch.Job
+		pods                  []*v1.Pod
+		wantPrevFailedIndexes orderedIntervals
+		wantFailedIndexes     orderedIntervals
 	}{
 		"one new index failed": {
 			job: batch.Job{
@@ -440,10 +404,9 @@ func TestGetPodsWithDelayedDeletionPerIndex(t *testing.T) {
 	logger, _ := ktesting.NewTestContext(t)
 	now := time.Now()
 	cases := map[string]struct {
-		enableJobPodFailurePolicy           bool
 		job                                 batch.Job
 		pods                                []*v1.Pod
-		expectedRmFinalizers                sets.Set[string]
+		expectedRmFinalizers                sets.Set[types.UID]
 		wantPodsWithDelayedDeletionPerIndex []string
 	}{
 		"failed pods are kept corresponding to non-failed indexes are kept": {
@@ -482,7 +445,7 @@ func TestGetPodsWithDelayedDeletionPerIndex(t *testing.T) {
 			pods: []*v1.Pod{
 				buildPod().uid("a").indexFailureCount("0").phase(v1.PodFailed).index("0").trackingFinalizer().Pod,
 			},
-			expectedRmFinalizers:                sets.New("a"),
+			expectedRmFinalizers:                sets.New[types.UID]("a"),
 			wantPodsWithDelayedDeletionPerIndex: []string{},
 		},
 		"failed pod with index outside of completions; the pod's deletion is not delayed": {
@@ -581,7 +544,6 @@ func TestGetPodsWithDelayedDeletionPerIndex(t *testing.T) {
 func TestGetNewIndexFailureCountValue(t *testing.T) {
 	logger, _ := ktesting.NewTestContext(t)
 	cases := map[string]struct {
-		enableJobPodFailurePolicy       bool
 		job                             batch.Job
 		pod                             *v1.Pod
 		wantNewIndexFailureCount        int32
@@ -601,8 +563,7 @@ func TestGetNewIndexFailureCountValue(t *testing.T) {
 			pod:                      buildPod().uid("a").indexFailureCount("3").phase(v1.PodFailed).index("0").trackingFinalizer().Pod,
 			wantNewIndexFailureCount: 4,
 		},
-		"failed pod being replaced, matching the ignore rule; JobPodFailurePolicy enabled": {
-			enableJobPodFailurePolicy: true,
+		"failed pod being replaced, matching the ignore rule": {
 			job: batch.Job{
 				Spec: batch.JobSpec{
 					PodFailurePolicy: &batch.PodFailurePolicy{
@@ -636,7 +597,6 @@ func TestGetNewIndexFailureCountValue(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, true)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodFailurePolicy, tc.enableJobPodFailurePolicy)
 			gotNewIndexFailureCount, gotNewIndexIgnoredFailureCount := getNewIndexFailureCounts(logger, &tc.job, tc.pod)
 			if diff := cmp.Diff(tc.wantNewIndexFailureCount, gotNewIndexFailureCount); diff != "" {
 				t.Errorf("Unexpected set of pods with delayed deletion (-want,+got):\n%s", diff)

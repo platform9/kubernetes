@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/runtime/serializer/cbor"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -51,9 +52,10 @@ import (
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/routes"
 	"k8s.io/apiserver/pkg/storageversion"
-	utilversion "k8s.io/apiserver/pkg/util/version"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/component-base/featuregate"
+	utilversion "k8s.io/component-base/version"
 	"k8s.io/klog/v2"
 	openapibuilder3 "k8s.io/kube-openapi/pkg/builder3"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
@@ -232,6 +234,10 @@ type GenericAPIServer struct {
 
 	// APIServerID is the ID of this API server
 	APIServerID string
+
+	// StorageReadinessHook implements post-start-hook functionality for checking readiness
+	// of underlying storage for registered resources.
+	StorageReadinessHook *StorageReadinessHook
 
 	// StorageVersionManager holds the storage versions of the API resources installed by this server.
 	StorageVersionManager storageversion.Manager
@@ -844,6 +850,7 @@ func (s *GenericAPIServer) InstallLegacyAPIGroup(apiPrefix string, apiGroupInfo 
 	} else {
 		s.Handler.GoRestfulContainer.Add(legacyRootAPIHandler.WebService())
 	}
+	s.registerStorageReadinessCheck("", apiGroupInfo)
 
 	return nil
 }
@@ -902,8 +909,26 @@ func (s *GenericAPIServer) InstallAPIGroups(apiGroupInfos ...*APIGroupInfo) erro
 
 		s.DiscoveryGroupManager.AddGroup(apiGroup)
 		s.Handler.GoRestfulContainer.Add(discovery.NewAPIGroupHandler(s.Serializer, apiGroup).WebService())
+		s.registerStorageReadinessCheck(apiGroupInfo.PrioritizedVersions[0].Group, apiGroupInfo)
 	}
 	return nil
+}
+
+// registerStorageReadinessCheck registers the readiness checks for all underlying storages
+// for a given APIGroup.
+func (s *GenericAPIServer) registerStorageReadinessCheck(groupName string, apiGroupInfo *APIGroupInfo) {
+	for version, storageMap := range apiGroupInfo.VersionedResourcesStorageMap {
+		for resource, storage := range storageMap {
+			if withReadiness, ok := storage.(rest.StorageWithReadiness); ok {
+				gvr := metav1.GroupVersionResource{
+					Group:    groupName,
+					Version:  version,
+					Resource: resource,
+				}
+				s.StorageReadinessHook.RegisterStorage(gvr, withReadiness)
+			}
+		}
+	}
 }
 
 // InstallAPIGroup exposes the given api group in the API.
@@ -966,6 +991,9 @@ func (s *GenericAPIServer) newAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupV
 // NewDefaultAPIGroupInfo returns an APIGroupInfo stubbed with "normal" values
 // exposed for easier composition from other packages
 func NewDefaultAPIGroupInfo(group string, scheme *runtime.Scheme, parameterCodec runtime.ParameterCodec, codecs serializer.CodecFactory) APIGroupInfo {
+	if utilfeature.DefaultFeatureGate.Enabled(features.CBORServingAndStorage) {
+		codecs = serializer.NewCodecFactory(scheme, serializer.WithSerializer(cbor.NewSerializerInfo))
+	}
 	return APIGroupInfo{
 		PrioritizedVersions:          scheme.PrioritizedVersionsForGroup(group),
 		VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},

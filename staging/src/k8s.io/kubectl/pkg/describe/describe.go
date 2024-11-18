@@ -45,14 +45,13 @@ import (
 	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	networkingv1 "k8s.io/api/networking/v1"
-	networkingv1alpha1 "k8s.io/api/networking/v1alpha1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	storagev1alpha1 "k8s.io/api/storage/v1alpha1"
+	storagev1beta1 "k8s.io/api/storage/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -216,8 +215,8 @@ func describerMap(clientConfig *rest.Config) (map[schema.GroupKind]ResourceDescr
 		{Group: networkingv1beta1.GroupName, Kind: "IngressClass"}:                &IngressClassDescriber{c},
 		{Group: networkingv1.GroupName, Kind: "Ingress"}:                          &IngressDescriber{c},
 		{Group: networkingv1.GroupName, Kind: "IngressClass"}:                     &IngressClassDescriber{c},
-		{Group: networkingv1alpha1.GroupName, Kind: "ServiceCIDR"}:                &ServiceCIDRDescriber{c},
-		{Group: networkingv1alpha1.GroupName, Kind: "IPAddress"}:                  &IPAddressDescriber{c},
+		{Group: networkingv1beta1.GroupName, Kind: "ServiceCIDR"}:                 &ServiceCIDRDescriber{c},
+		{Group: networkingv1beta1.GroupName, Kind: "IPAddress"}:                   &IPAddressDescriber{c},
 		{Group: batchv1.GroupName, Kind: "Job"}:                                   &JobDescriber{c},
 		{Group: batchv1.GroupName, Kind: "CronJob"}:                               &CronJobDescriber{c},
 		{Group: batchv1beta1.GroupName, Kind: "CronJob"}:                          &CronJobDescriber{c},
@@ -228,7 +227,7 @@ func describerMap(clientConfig *rest.Config) (map[schema.GroupKind]ResourceDescr
 		{Group: certificatesv1beta1.GroupName, Kind: "CertificateSigningRequest"}: &CertificateSigningRequestDescriber{c},
 		{Group: storagev1.GroupName, Kind: "StorageClass"}:                        &StorageClassDescriber{c},
 		{Group: storagev1.GroupName, Kind: "CSINode"}:                             &CSINodeDescriber{c},
-		{Group: storagev1alpha1.GroupName, Kind: "VolumeAttributesClass"}:         &VolumeAttributesClassDescriber{c},
+		{Group: storagev1beta1.GroupName, Kind: "VolumeAttributesClass"}:          &VolumeAttributesClassDescriber{c},
 		{Group: policyv1beta1.GroupName, Kind: "PodDisruptionBudget"}:             &PodDisruptionBudgetDescriber{c},
 		{Group: policyv1.GroupName, Kind: "PodDisruptionBudget"}:                  &PodDisruptionBudgetDescriber{c},
 		{Group: rbacv1.GroupName, Kind: "Role"}:                                   &RoleDescriber{c},
@@ -839,6 +838,11 @@ func describePod(pod *corev1.Pod, events *corev1.EventList) (string, error) {
 			w.Write(LEVEL_0, "NominatedNodeName:\t%s\n", pod.Status.NominatedNodeName)
 		}
 
+		if pod.Spec.Resources != nil {
+			w.Write(LEVEL_0, "Resources:\n")
+			describeResources(pod.Spec.Resources, w, LEVEL_1)
+		}
+
 		if len(pod.Spec.InitContainers) > 0 {
 			describeContainers("Init Containers", pod.Spec.InitContainers, pod.Status.InitContainerStatuses, EnvValueRetriever(pod), w, "")
 		}
@@ -1001,6 +1005,8 @@ func describeVolumes(volumes []corev1.Volume, w PrefixWriter, space string) {
 			printProjectedVolumeSource(volume.VolumeSource.Projected, w)
 		case volume.VolumeSource.CSI != nil:
 			printCSIVolumeSource(volume.VolumeSource.CSI, w)
+		case volume.VolumeSource.Image != nil:
+			printImageVolumeSource(volume.VolumeSource.Image, w)
 		default:
 			w.Write(LEVEL_1, "<unknown>\n")
 		}
@@ -1482,6 +1488,13 @@ func printCSIPersistentVolumeAttributesMultilineIndent(w PrefixWriter, initialIn
 	}
 }
 
+func printImageVolumeSource(image *corev1.ImageVolumeSource, w PrefixWriter) {
+	w.Write(LEVEL_2, "Type:\tImage (a container image or OCI artifact)\n"+
+		"    Reference:\t%v\n"+
+		"    PullPolicy:\t%v\n",
+		image.Reference, image.PullPolicy)
+}
+
 type PersistentVolumeDescriber struct {
 	clientset.Interface
 }
@@ -1792,7 +1805,7 @@ func describeContainers(label string, containers []corev1.Container, containerSt
 		if ok {
 			describeContainerState(status, w)
 		}
-		describeContainerResource(container, w)
+		describeResources(&container.Resources, w, LEVEL_2)
 		describeContainerProbe(container, w)
 		if len(container.EnvFrom) > 0 {
 			describeContainerEnvFrom(container, resolverFn, w)
@@ -1878,22 +1891,25 @@ func describeContainerCommand(container corev1.Container, w PrefixWriter) {
 	}
 }
 
-func describeContainerResource(container corev1.Container, w PrefixWriter) {
-	resources := container.Resources
+func describeResources(resources *corev1.ResourceRequirements, w PrefixWriter, level int) {
+	if resources == nil {
+		return
+	}
+
 	if len(resources.Limits) > 0 {
-		w.Write(LEVEL_2, "Limits:\n")
+		w.Write(level, "Limits:\n")
 	}
 	for _, name := range SortedResourceNames(resources.Limits) {
 		quantity := resources.Limits[name]
-		w.Write(LEVEL_3, "%s:\t%s\n", name, quantity.String())
+		w.Write(level+1, "%s:\t%s\n", name, quantity.String())
 	}
 
 	if len(resources.Requests) > 0 {
-		w.Write(LEVEL_2, "Requests:\n")
+		w.Write(level, "Requests:\n")
 	}
 	for _, name := range SortedResourceNames(resources.Requests) {
 		quantity := resources.Requests[name]
-		w.Write(LEVEL_3, "%s:\t%s\n", name, quantity.String())
+		w.Write(level+1, "%s:\t%s\n", name, quantity.String())
 	}
 }
 
@@ -2871,17 +2887,17 @@ type ServiceCIDRDescriber struct {
 func (c *ServiceCIDRDescriber) Describe(namespace, name string, describerSettings DescriberSettings) (string, error) {
 	var events *corev1.EventList
 
-	svcV1alpha1, err := c.client.NetworkingV1alpha1().ServiceCIDRs().Get(context.TODO(), name, metav1.GetOptions{})
+	svcV1beta1, err := c.client.NetworkingV1beta1().ServiceCIDRs().Get(context.TODO(), name, metav1.GetOptions{})
 	if err == nil {
 		if describerSettings.ShowEvents {
-			events, _ = searchEvents(c.client.CoreV1(), svcV1alpha1, describerSettings.ChunkSize)
+			events, _ = searchEvents(c.client.CoreV1(), svcV1beta1, describerSettings.ChunkSize)
 		}
-		return c.describeServiceCIDRV1alpha1(svcV1alpha1, events)
+		return c.describeServiceCIDRV1beta1(svcV1beta1, events)
 	}
 	return "", err
 }
 
-func (c *ServiceCIDRDescriber) describeServiceCIDRV1alpha1(svc *networkingv1alpha1.ServiceCIDR, events *corev1.EventList) (string, error) {
+func (c *ServiceCIDRDescriber) describeServiceCIDRV1beta1(svc *networkingv1beta1.ServiceCIDR, events *corev1.EventList) (string, error) {
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
 		w.Write(LEVEL_0, "Name:\t%v\n", svc.Name)
@@ -2920,17 +2936,17 @@ type IPAddressDescriber struct {
 func (c *IPAddressDescriber) Describe(namespace, name string, describerSettings DescriberSettings) (string, error) {
 	var events *corev1.EventList
 
-	ipV1alpha1, err := c.client.NetworkingV1alpha1().IPAddresses().Get(context.TODO(), name, metav1.GetOptions{})
+	ipV1beta1, err := c.client.NetworkingV1beta1().IPAddresses().Get(context.TODO(), name, metav1.GetOptions{})
 	if err == nil {
 		if describerSettings.ShowEvents {
-			events, _ = searchEvents(c.client.CoreV1(), ipV1alpha1, describerSettings.ChunkSize)
+			events, _ = searchEvents(c.client.CoreV1(), ipV1beta1, describerSettings.ChunkSize)
 		}
-		return c.describeIPAddressV1alpha1(ipV1alpha1, events)
+		return c.describeIPAddressV1beta1(ipV1beta1, events)
 	}
 	return "", err
 }
 
-func (c *IPAddressDescriber) describeIPAddressV1alpha1(ip *networkingv1alpha1.IPAddress, events *corev1.EventList) (string, error) {
+func (c *IPAddressDescriber) describeIPAddressV1beta1(ip *networkingv1beta1.IPAddress, events *corev1.EventList) (string, error) {
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
 		w.Write(LEVEL_0, "Name:\t%v\n", ip.Name)
@@ -3632,10 +3648,11 @@ func (d *NodeDescriber) Describe(namespace, name string, describerSettings Descr
 		return "", err
 	}
 
-	fieldSelector, err := fields.ParseSelector("spec.nodeName=" + name + ",status.phase!=" + string(corev1.PodSucceeded) + ",status.phase!=" + string(corev1.PodFailed))
-	if err != nil {
-		return "", err
-	}
+	fieldSelector := fields.AndSelectors(
+		fields.OneTermEqualSelector("spec.nodeName", name),
+		fields.OneTermNotEqualSelector("status.phase", string(corev1.PodSucceeded)),
+		fields.OneTermNotEqualSelector("status.phase", string(corev1.PodFailed)),
+	)
 	// in a policy aware setting, users may have access to a node, but not all pods
 	// in that case, we note that the user does not have access to the pods
 	canViewPods := true
@@ -4723,7 +4740,7 @@ type VolumeAttributesClassDescriber struct {
 }
 
 func (d *VolumeAttributesClassDescriber) Describe(namespace, name string, describerSettings DescriberSettings) (string, error) {
-	vac, err := d.StorageV1alpha1().VolumeAttributesClasses().Get(context.TODO(), name, metav1.GetOptions{})
+	vac, err := d.StorageV1beta1().VolumeAttributesClasses().Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -4736,7 +4753,7 @@ func (d *VolumeAttributesClassDescriber) Describe(namespace, name string, descri
 	return describeVolumeAttributesClass(vac, events)
 }
 
-func describeVolumeAttributesClass(vac *storagev1alpha1.VolumeAttributesClass, events *corev1.EventList) (string, error) {
+func describeVolumeAttributesClass(vac *storagev1beta1.VolumeAttributesClass, events *corev1.EventList) (string, error) {
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
 		w.Write(LEVEL_0, "Name:\t%s\n", vac.Name)
@@ -5443,6 +5460,15 @@ func formatEndpointSlices(endpointSlices []discoveryv1.EndpointSlice, ports sets
 				if len(list) == max {
 					more = true
 				}
+				isReady := endpointSlices[i].Endpoints[j].Conditions.Ready == nil || *endpointSlices[i].Endpoints[j].Conditions.Ready
+				if !isReady {
+					// ready indicates that this endpoint is prepared to receive traffic,
+					// according to whatever system is managing the endpoint. A nil value
+					// indicates an unknown state. In most cases consumers should interpret this
+					// unknown state as ready.
+					// More info: vendor/k8s.io/api/discovery/v1/types.go
+					continue
+				}
 				if !more {
 					list = append(list, endpointSlices[i].Endpoints[j].Addresses[0])
 				}
@@ -5458,6 +5484,15 @@ func formatEndpointSlices(endpointSlices []discoveryv1.EndpointSlice, ports sets
 							more = true
 						}
 						addr := endpointSlices[i].Endpoints[k].Addresses[0]
+						isReady := endpointSlices[i].Endpoints[k].Conditions.Ready == nil || *endpointSlices[i].Endpoints[k].Conditions.Ready
+						if !isReady {
+							// ready indicates that this endpoint is prepared to receive traffic,
+							// according to whatever system is managing the endpoint. A nil value
+							// indicates an unknown state. In most cases consumers should interpret this
+							// unknown state as ready.
+							// More info: vendor/k8s.io/api/discovery/v1/types.go
+							continue
+						}
 						if !more {
 							hostPort := net.JoinHostPort(addr, strconv.Itoa(int(*port.Port)))
 							list = append(list, hostPort)

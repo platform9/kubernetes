@@ -26,7 +26,14 @@ run_wait_tests() {
 
     create_and_use_new_namespace
 
-    ### Wait for deletion using --all flag
+    # wait --for=create should time out
+    set +o errexit
+    # Command: Wait with jsonpath support fields not exist in the first place
+    output_message=$(kubectl wait --for=create deploy/test-1 --timeout=1s 2>&1)
+    set -o errexit
+
+    # Post-Condition: Wait failed
+    kube::test::if_has_string "${output_message}" 'timed out waiting for the condition'
 
     # create test data
     kubectl create deployment test-1 --image=busybox
@@ -43,6 +50,12 @@ run_wait_tests() {
 
     # Post-Condition: Wait failed
     kube::test::if_has_string "${output_message}" 'timed out'
+
+    # wait with mixed case jsonpath
+    output_message=$(kubectl wait --for=jsonpath=.status.unavailableReplicas=1 deploy/test-1 2>&1)
+
+    # Post-Condition: Wait failed
+    kube::test::if_has_string "${output_message}" 'test-1 condition met'
 
     # Delete all deployments async to kubectl wait
     ( sleep 2 && kubectl delete deployment --all ) &
@@ -120,3 +133,4 @@ EOF
     set +o nounset
     set +o errexit
 }
+

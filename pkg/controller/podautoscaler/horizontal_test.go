@@ -82,7 +82,7 @@ func statusOkWithOverrides(overrides ...autoscalingv2.HorizontalPodAutoscalerCon
 	resv2 := make([]autoscalingv2.HorizontalPodAutoscalerCondition, len(statusOk))
 	copy(resv2, statusOk)
 	for _, override := range overrides {
-		resv2 = setConditionInList(resv2, override.Type, override.Status, override.Reason, override.Message)
+		resv2 = setConditionInList(resv2, override.Type, override.Status, override.Reason, "%s", override.Message)
 	}
 
 	// copy to a v1 slice
@@ -757,7 +757,7 @@ func (tc *testCase) setupController(t *testing.T) (*HorizontalController, inform
 					tc.expectedDesiredReplicas,
 					(int64(tc.reportedLevels[0])*100)/tc.reportedCPURequests[0].MilliValue(), tc.specReplicas), obj.Message)
 			default:
-				assert.False(t, true, fmt.Sprintf("Unexpected event: %s / %s", obj.Reason, obj.Message))
+				assert.False(t, true, "Unexpected event: %s / %s", obj.Reason, obj.Message)
 			}
 		}
 		tc.eventCreated = true
@@ -3863,7 +3863,7 @@ func TestCalculateScaleUpLimitWithScalingRules(t *testing.T) {
 			},
 		},
 	})
-	assert.Equal(t, calculated, int32(2))
+	assert.Equal(t, int32(2), calculated)
 }
 
 func TestCalculateScaleDownLimitWithBehaviors(t *testing.T) {
@@ -3885,7 +3885,7 @@ func TestCalculateScaleDownLimitWithBehaviors(t *testing.T) {
 			},
 		},
 	})
-	assert.Equal(t, calculated, int32(3))
+	assert.Equal(t, int32(3), calculated)
 }
 
 func generateScalingRules(pods, podsPeriod, percent, percentPeriod, stabilizationWindow int32) *autoscalingv2.HPAScalingRules {
@@ -5293,5 +5293,5 @@ func TestMultipleHPAs(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, hpaCount, len(processedHPA), "Expected to process all HPAs")
+	assert.Len(t, processedHPA, hpaCount, "Expected to process all HPAs")
 }

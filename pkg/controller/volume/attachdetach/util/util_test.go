@@ -217,7 +217,7 @@ func Test_CreateVolumeSpec(t *testing.T) {
 			},
 		},
 		{
-			desc:           "CSINode not found for a volume type that supports csi migration",
+			desc:           "CSINode not found for a volume type that completes csi migration",
 			createNodeName: kubetypes.NodeName("another-node"),
 			pod: &v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -238,13 +238,12 @@ func Test_CreateVolumeSpec(t *testing.T) {
 					},
 				},
 			},
-			wantErrorMessage: "csiNode \"another-node\" not found",
 		},
 	} {
 		t.Run(test.desc, func(t *testing.T) {
 			logger, _ := ktesting.NewTestContext(t)
 			plugMgr, intreeToCSITranslator, csiTranslator, pvLister, pvcLister := setup(testNodeName, t)
-			actualSpec, err := CreateVolumeSpec(logger, test.pod.Spec.Volumes[0], test.pod, test.createNodeName, plugMgr, pvcLister, pvLister, intreeToCSITranslator, csiTranslator)
+			actualSpec, err := CreateVolumeSpecWithNodeMigration(logger, test.pod.Spec.Volumes[0], test.pod, test.createNodeName, plugMgr, pvcLister, pvLister, intreeToCSITranslator, csiTranslator)
 
 			if actualSpec == nil && (test.wantPersistentVolume != nil || test.wantVolume != nil) {
 				t.Errorf("got volume spec is nil")

@@ -92,11 +92,12 @@ type Extra struct {
 	ServiceAccountIssuer        serviceaccount.TokenGenerator
 	ServiceAccountMaxExpiration time.Duration
 	ExtendExpiration            bool
+	IsTokenSignerExternal       bool
 
 	// ServiceAccountIssuerDiscovery
-	ServiceAccountIssuerURL  string
-	ServiceAccountJWKSURI    string
-	ServiceAccountPublicKeys []interface{}
+	ServiceAccountIssuerURL        string
+	ServiceAccountJWKSURI          string
+	ServiceAccountPublicKeysGetter serviceaccount.PublicKeysGetter
 
 	SystemNamespaces []string
 
@@ -118,6 +119,7 @@ func BuildGenericConfig(
 	lastErr error,
 ) {
 	genericConfig = genericapiserver.NewConfig(legacyscheme.Codecs)
+	genericConfig.Flagz = s.Flagz
 	genericConfig.MergedResourceConfig = resourceConfig
 
 	if lastErr = s.GenericServerRunOptions.ApplyTo(genericConfig); lastErr != nil {
@@ -300,6 +302,7 @@ func CreateConfig(
 			ServiceAccountIssuer:        opts.ServiceAccountIssuer,
 			ServiceAccountMaxExpiration: opts.ServiceAccountTokenMaxExpiration,
 			ExtendExpiration:            opts.Authentication.ServiceAccounts.ExtendExpiration,
+			IsTokenSignerExternal:       opts.Authentication.ServiceAccounts.IsTokenSignerExternal,
 
 			VersionedInformers: versionedInformers,
 		},
@@ -337,6 +340,7 @@ func CreateConfig(
 		config.ClusterAuthenticationInfo.RequestHeaderExtraHeaderPrefixes = requestHeaderConfig.ExtraHeaderPrefixes
 		config.ClusterAuthenticationInfo.RequestHeaderGroupHeaders = requestHeaderConfig.GroupHeaders
 		config.ClusterAuthenticationInfo.RequestHeaderUsernameHeaders = requestHeaderConfig.UsernameHeaders
+		config.ClusterAuthenticationInfo.RequestHeaderUIDHeaders = requestHeaderConfig.UIDHeaders
 	}
 
 	// setup admission
@@ -368,18 +372,24 @@ func CreateConfig(
 		return nil, nil, fmt.Errorf("failed to apply admission: %w", err)
 	}
 
-	// Load and set the public keys.
-	var pubKeys []interface{}
-	for _, f := range opts.Authentication.ServiceAccounts.KeyFiles {
-		keys, err := keyutil.PublicKeysFromFile(f)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse key file %q: %w", f, err)
+	if len(opts.Authentication.ServiceAccounts.KeyFiles) > 0 {
+		// Load and set the public keys.
+		var pubKeys []interface{}
+		for _, f := range opts.Authentication.ServiceAccounts.KeyFiles {
+			keys, err := keyutil.PublicKeysFromFile(f)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to parse key file %q: %w", f, err)
+			}
+			pubKeys = append(pubKeys, keys...)
 		}
-		pubKeys = append(pubKeys, keys...)
+		keysGetter, err := serviceaccount.StaticPublicKeysGetter(pubKeys)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to set up public service account keys: %w", err)
+		}
+		config.ServiceAccountPublicKeysGetter = keysGetter
 	}
 	config.ServiceAccountIssuerURL = opts.Authentication.ServiceAccounts.Issuers[0]
 	config.ServiceAccountJWKSURI = opts.Authentication.ServiceAccounts.JWKSURI
-	config.ServiceAccountPublicKeys = pubKeys
 
 	return config, genericInitializers, nil
 }

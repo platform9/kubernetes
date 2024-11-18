@@ -67,12 +67,13 @@ func TestValidationExpressions(t *testing.T) {
 		// equality, comparisons and type specific functions
 		{name: "integers",
 			// 1st obj and schema args are for "self.val1" field, 2nd for "self.val2" and so on.
-			obj:    objs(math.MaxInt64, math.MaxInt64, math.MaxInt32, math.MaxInt32, math.MaxInt64, math.MaxInt64),
+			obj: objs(int64(math.MaxInt64), int64(math.MaxInt64), int32(math.MaxInt32), int32(math.MaxInt32),
+				int64(math.MaxInt64), int64(math.MaxInt64)),
 			schema: schemas(integerType, integerType, int32Type, int32Type, int64Type, int64Type),
 			valid: []string{
-				ValsEqualThemselvesAndDataLiteral("self.val1", "self.val2", fmt.Sprintf("%d", math.MaxInt64)),
+				ValsEqualThemselvesAndDataLiteral("self.val1", "self.val2", fmt.Sprintf("%d", int64(math.MaxInt64))),
 				ValsEqualThemselvesAndDataLiteral("self.val3", "self.val4", fmt.Sprintf("%d", math.MaxInt32)),
-				ValsEqualThemselvesAndDataLiteral("self.val5", "self.val6", fmt.Sprintf("%d", math.MaxInt64)),
+				ValsEqualThemselvesAndDataLiteral("self.val5", "self.val6", fmt.Sprintf("%d", int64(math.MaxInt64))),
 				"self.val1 == self.val6", // integer with no format is the same as int64
 				"type(self.val1) == int",
 				fmt.Sprintf("self.val3 + 1 == %d + 1", math.MaxInt32), // CEL integers are 64 bit
@@ -86,7 +87,8 @@ func TestValidationExpressions(t *testing.T) {
 			},
 		},
 		{name: "numbers",
-			obj:    objs(math.MaxFloat64, math.MaxFloat64, math.MaxFloat32, math.MaxFloat32, math.MaxFloat64, math.MaxFloat64, int64(1)),
+			obj: objs(float64(math.MaxFloat64), float64(math.MaxFloat64), float32(math.MaxFloat32), float32(math.MaxFloat32),
+				float64(math.MaxFloat64), float64(math.MaxFloat64), int64(1)),
 			schema: schemas(numberType, numberType, floatType, floatType, doubleType, doubleType, doubleType),
 			valid: []string{
 				ValsEqualThemselvesAndDataLiteral("self.val1", "self.val2", fmt.Sprintf("%f", math.MaxFloat64)),
@@ -641,6 +643,15 @@ func TestValidationExpressions(t *testing.T) {
 				"size(self.val) == 2",
 				"self.val.map(k, self.val[k]).exists(v, v == 1)",
 				"size(self.val.filter(k, self.val[k] > 1)) == 1",
+
+				// two variable comprehensions
+				"self.val.all(k, v, v > 0)",
+				"self.val.exists(k, v, v == 2)",
+				"self.val.existsOne(k, v, v == 2)",
+				"self.val.transformMap(k, v, v > 1, v + 1).size() == 1",
+				"self.val.transformMap(k, v, v + 1).size() == 2",
+				"self.val.transformMapEntry(k, v, v > 1, {k + '2': v + 1}).size() == 1",
+				"self.val.transformMapEntry(k, v, {k + '2': v + 1}).size() == 2",
 			},
 			errors: map[string]string{
 				"self.val['c'] == 1": "no such key: c",
@@ -689,6 +700,13 @@ func TestValidationExpressions(t *testing.T) {
 				// all() and exists() macros ignore errors from predicates so long as the condition holds for at least one element
 				"self.listMap.exists(m, m.v2 == 'z')",
 				"!self.listMap.all(m, m.v2 != 'z')",
+
+				// two variable comprehensions
+				"!self.listMap.all(i, m, has(m.v2) && m.v2 != 'z')",
+				"self.listMap.exists(i, m, has(m.v2) && m.v2 == 'z')",
+				"self.listMap.existsOne(i, m, has(m.v2) && m.v2 == 'z')",
+				"self.listMap.transformList(i, m, has(m.v2) && m.v2 == 'z', m.v2).size() == 1",
+				"self.listMap.transformList(i, m, m.v).size() == 3",
 			},
 			errors: map[string]string{
 				// test comprehensions where the field used in predicates is unset on all but one of the elements: (error cases)
@@ -725,6 +743,13 @@ func TestValidationExpressions(t *testing.T) {
 				"size(self.array.filter(e, e%2 == 0)) == 3",
 				"self.array.map(e, e * 20).filter(e, e > 50).exists(e, e == 60)",
 				"size(self.array) == 8",
+
+				// two variable comprehensions
+				"self.array.all(i, e, e > 0)",
+				"self.array.exists(i, e, e > 2)",
+				"self.array.existsOne(i, e, e > 4)",
+				"self.array.transformList(i, e, e > 2, e * 2).size() > 0",
+				"self.array.transformList(i, e, e * 2).size() > 0",
 			},
 			errors: map[string]string{
 				"self.array[100] == 0": "index out of bounds: 100",
@@ -895,6 +920,48 @@ func TestValidationExpressions(t *testing.T) {
 			errors: map[string]string{
 				// only name and generateName are accessible on metadata
 				"has(self.embedded.metadata.namespace)": "undefined field 'namespace'",
+			},
+		},
+		{name: "embedded object with usage of reserved keywords",
+			obj: map[string]interface{}{
+				"embedded": map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":         "foo",
+						"generateName": "pickItForMe",
+						"namespace":    "reserved_keyword_namespace",
+					},
+					"spec": map[string]interface{}{
+						"if": "reserved_keyword_if",
+					},
+				},
+			},
+			schema: objectTypePtr(map[string]schema.Structural{
+				"embedded": {
+					Generic: schema.Generic{Type: "object"},
+					Extensions: schema.Extensions{
+						XEmbeddedResource: true,
+					},
+					Properties: map[string]schema.Structural{
+						"kind":       stringType,
+						"apiVersion": stringType,
+						"metadata": objectType(map[string]schema.Structural{
+							"name":         stringType,
+							"generateName": stringType,
+							"namespace":    stringType,
+						}),
+						"spec": objectType(map[string]schema.Structural{
+							"if": stringType,
+						}),
+					},
+				},
+			}),
+			valid: []string{
+				"has(self.embedded.metadata.namespace)",
+				"self.embedded.metadata.namespace == 'reserved_keyword_namespace'",
+				"has(self.embedded.spec.if)",
+				"self.embedded.spec.if == 'reserved_keyword_if'",
 			},
 		},
 		{name: "embedded object with preserve unknown",
@@ -2060,6 +2127,26 @@ func TestValidationExpressions(t *testing.T) {
 				`cidr('::1/128').ip().family() == 6`,
 			},
 		},
+		{name: "format",
+			obj:    objs("20", "200M"),
+			schema: schemas(stringType, stringType),
+			valid: []string{
+				`format.dns1123Label().validate("my-label-name") == optional.none()`,
+				`format.dns1123Subdomain().validate("apiextensions.k8s.io") == optional.none()`,
+				`format.qualifiedName().validate("apiextensions.k8s.io/v1beta1") == optional.none()`,
+				`format.dns1123LabelPrefix().validate("my-label-prefix-") == optional.none()`,
+				`format.dns1123SubdomainPrefix().validate("mysubdomain.prefix.-") == optional.none()`,
+				`format.dns1035LabelPrefix().validate("my-label-prefix-") == optional.none()`,
+				`format.uri().validate("http://example.com") == optional.none()`,
+				`format.uuid().validate("123e4567-e89b-12d3-a456-426614174000") == optional.none()`,
+				`format.byte().validate("aGVsbG8=") == optional.none()`,
+				`format.date().validate("2021-01-01") == optional.none()`,
+				`format.datetime().validate("2021-01-01T00:00:00Z") == optional.none()`,
+				`format.named("dns1123Label").value().validate("my-name") == optional.none()`,
+				`format.dns1123Label().validate("contains a space").value()[0] == "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or \'-\', and must start and end with an alphanumeric character (e.g. \'my-name\',  or \'123-abc\', regex used for validation is \'[a-z0-9]([-a-z0-9]*[a-z0-9])?\')"`,
+				`!format.named("unknown").hasValue()`,
+			},
+		},
 	}
 
 	for i := range tests {
@@ -2842,7 +2929,7 @@ func TestCELValidationLimit(t *testing.T) {
 	}{
 		{
 			name:   "test limit",
-			obj:    objs(math.MaxInt64),
+			obj:    objs(int64(math.MaxInt64)),
 			schema: schemas(integerType),
 			valid: []string{
 				"self.val1 > 0",

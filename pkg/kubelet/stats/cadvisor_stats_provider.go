@@ -77,7 +77,7 @@ func newCadvisorStatsProvider(
 }
 
 // ListPodStats returns the stats of all the pod-managed containers.
-func (p *cadvisorStatsProvider) ListPodStats(_ context.Context) ([]statsapi.PodStats, error) {
+func (p *cadvisorStatsProvider) ListPodStats(ctx context.Context) ([]statsapi.PodStats, error) {
 	// Gets node root filesystem information and image filesystem stats, which
 	// will be used to populate the available and capacity bytes/inodes in
 	// container stats.
@@ -85,7 +85,7 @@ func (p *cadvisorStatsProvider) ListPodStats(_ context.Context) ([]statsapi.PodS
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rootFs info: %v", err)
 	}
-	imageFsInfo, err := p.cadvisor.ImagesFsInfo()
+	imageFsInfo, err := p.cadvisor.ImagesFsInfo(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get imageFs info: %v", err)
 	}
@@ -139,6 +139,8 @@ func (p *cadvisorStatsProvider) ListPodStats(_ context.Context) ([]statsapi.PodS
 			}
 			podStats.Containers = append(podStats.Containers, *containerStat)
 		}
+		// Either way, collect process stats
+		podStats.ProcessStats = mergeProcessStats(podStats.ProcessStats, cadvisorInfoToProcessStats(&cinfo))
 	}
 
 	// Add each PodStats to the result.
@@ -154,7 +156,7 @@ func (p *cadvisorStatsProvider) ListPodStats(_ context.Context) ([]statsapi.PodS
 			podStats.CPU = cpu
 			podStats.Memory = memory
 			podStats.Swap = cadvisorInfoToSwapStats(podInfo)
-			podStats.ProcessStats = cadvisorInfoToProcessStats(podInfo)
+			// ProcessStats were accumulated as the containers were iterated.
 		}
 
 		status, found := p.statusProvider.GetPodStatus(podUID)
@@ -239,7 +241,7 @@ func (p *cadvisorStatsProvider) ListPodCPUAndMemoryStats(_ context.Context) ([]s
 
 // ImageFsStats returns the stats of the filesystem for storing images.
 func (p *cadvisorStatsProvider) ImageFsStats(ctx context.Context) (imageFsRet *statsapi.FsStats, containerFsRet *statsapi.FsStats, errCall error) {
-	imageFsInfo, err := p.cadvisor.ImagesFsInfo()
+	imageFsInfo, err := p.cadvisor.ImagesFsInfo(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get imageFs info: %v", err)
 	}
@@ -267,51 +269,71 @@ func (p *cadvisorStatsProvider) ImageFsStats(ctx context.Context) (imageFsRet *s
 		}
 		return imageFs, imageFs, nil
 	}
-	containerFsInfo, err := p.cadvisor.ContainerFsInfo()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get container fs info: %v", err)
-	}
 	imageStats, err := p.imageService.ImageFsInfo(ctx)
-	if err != nil || imageStats == nil {
-		return nil, nil, fmt.Errorf("failed to get image stats: %v", err)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get image stats: %w", err)
 	}
+	if imageStats == nil || len(imageStats.ImageFilesystems) == 0 || len(imageStats.ContainerFilesystems) == 0 {
+		return nil, nil, fmt.Errorf("missing image stats: %+v", imageStats)
+	}
+
 	splitFileSystem := false
-	if imageStats.ImageFilesystems[0].FsId.Mountpoint != imageStats.ContainerFilesystems[0].FsId.Mountpoint {
-		klog.InfoS("Detect Split Filesystem", "ImageFilesystems", imageStats.ImageFilesystems[0], "ContainerFilesystems", imageStats.ContainerFilesystems[0])
+	imageFs := imageStats.ImageFilesystems[0]
+	containerFs := imageStats.ContainerFilesystems[0]
+	if imageFs.FsId != nil && containerFs.FsId != nil && imageFs.FsId.Mountpoint != containerFs.FsId.Mountpoint {
 		splitFileSystem = true
 	}
-	imageFs := imageStats.ImageFilesystems[0]
 	var imageFsInodesUsed *uint64
 	if imageFsInfo.Inodes != nil && imageFsInfo.InodesFree != nil {
 		imageFsIU := *imageFsInfo.Inodes - *imageFsInfo.InodesFree
 		imageFsInodesUsed = &imageFsIU
+	}
+	var usedBytes uint64
+	if imageFs.GetUsedBytes() != nil {
+		usedBytes = imageFs.GetUsedBytes().GetValue()
 	}
 
 	fsStats := &statsapi.FsStats{
 		Time:           metav1.NewTime(imageFsInfo.Timestamp),
 		AvailableBytes: &imageFsInfo.Available,
 		CapacityBytes:  &imageFsInfo.Capacity,
-		UsedBytes:      &imageFs.UsedBytes.Value,
+		UsedBytes:      &usedBytes,
 		InodesFree:     imageFsInfo.InodesFree,
 		Inodes:         imageFsInfo.Inodes,
 		InodesUsed:     imageFsInodesUsed,
 	}
+	// We rely on cadvisor to have the crio-containers label for split filesystem case.
+	// We return to avoid checking ContainerFsInfo.
 	if !splitFileSystem {
 		return fsStats, fsStats, nil
 	}
 
-	containerFs := imageStats.ContainerFilesystems[0]
+	containerFsInfo, err := p.cadvisor.ContainerFsInfo(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get container fs info: %w", err)
+	}
+	// ImageFs and ContainerFs could be on different paths on the same device.
+	if containerFsInfo.Device == imageFsInfo.Device {
+		return fsStats, fsStats, nil
+	}
+
+	klog.InfoS("Detect Split Filesystem", "ImageFilesystems", imageStats.ImageFilesystems[0], "ContainerFilesystems", imageStats.ContainerFilesystems[0])
+
 	var containerFsInodesUsed *uint64
 	if containerFsInfo.Inodes != nil && containerFsInfo.InodesFree != nil {
 		containerFsIU := *containerFsInfo.Inodes - *containerFsInfo.InodesFree
 		containerFsInodesUsed = &containerFsIU
+	}
+	var usedContainerBytes uint64
+	if containerFs.GetUsedBytes() != nil {
+		usedContainerBytes = containerFs.GetUsedBytes().GetValue()
 	}
 
 	fsContainerStats := &statsapi.FsStats{
 		Time:           metav1.NewTime(containerFsInfo.Timestamp),
 		AvailableBytes: &containerFsInfo.Available,
 		CapacityBytes:  &containerFsInfo.Capacity,
-		UsedBytes:      &containerFs.UsedBytes.Value,
+		UsedBytes:      &usedContainerBytes,
 		InodesFree:     containerFsInfo.InodesFree,
 		Inodes:         containerFsInfo.Inodes,
 		InodesUsed:     containerFsInodesUsed,
@@ -322,8 +344,8 @@ func (p *cadvisorStatsProvider) ImageFsStats(ctx context.Context) (imageFsRet *s
 
 // ImageFsDevice returns name of the device where the image filesystem locates,
 // e.g. /dev/sda1.
-func (p *cadvisorStatsProvider) ImageFsDevice(_ context.Context) (string, error) {
-	imageFsInfo, err := p.cadvisor.ImagesFsInfo()
+func (p *cadvisorStatsProvider) ImageFsDevice(ctx context.Context) (string, error) {
+	imageFsInfo, err := p.cadvisor.ImagesFsInfo(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -499,7 +521,7 @@ func getCadvisorContainerInfo(ca cadvisor.Interface) (map[string]cadvisorapiv2.C
 			// response.
 			klog.ErrorS(err, "Partial failure issuing cadvisor.ContainerInfoV2")
 		} else {
-			return nil, fmt.Errorf("failed to get root cgroup stats: %v", err)
+			return nil, fmt.Errorf("failed to get root cgroup stats: %w", err)
 		}
 	}
 	return infos, nil

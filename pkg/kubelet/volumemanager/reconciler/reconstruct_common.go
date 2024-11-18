@@ -74,7 +74,7 @@ type reconstructedVolume struct {
 	volumeSpec          *volumepkg.Spec
 	outerVolumeSpecName string
 	pod                 *v1.Pod
-	volumeGidValue      string
+	volumeGIDValue      string
 	devicePath          string
 	mounter             volumepkg.Mounter
 	deviceMounter       volumepkg.DeviceMounter
@@ -98,7 +98,7 @@ func (rv reconstructedVolume) MarshalLog() interface{} {
 		VolumeSpecName:      rv.volumeSpec.Name(),
 		OuterVolumeSpecName: rv.outerVolumeSpecName,
 		PodUID:              string(rv.pod.UID),
-		VolumeGIDValue:      rv.volumeGidValue,
+		VolumeGIDValue:      rv.volumeGIDValue,
 		DevicePath:          rv.devicePath,
 		SeLinuxMountContext: rv.seLinuxMountContext,
 	}
@@ -340,8 +340,7 @@ func (rc *reconciler) reconstructVolume(volume podVolume) (rvolume *reconstructe
 		var newMapperErr error
 		volumeMapper, newMapperErr = mapperPlugin.NewBlockVolumeMapper(
 			volumeSpec,
-			pod,
-			volumepkg.VolumeOptions{})
+			pod)
 		if newMapperErr != nil {
 			return nil, fmt.Errorf(
 				"reconstructVolume.NewBlockVolumeMapper failed for volume %q (spec.Name: %q) pod %q (UID: %q) with: %v",
@@ -353,10 +352,7 @@ func (rc *reconciler) reconstructVolume(volume podVolume) (rvolume *reconstructe
 		}
 	} else {
 		var err error
-		volumeMounter, err = plugin.NewMounter(
-			volumeSpec,
-			pod,
-			volumepkg.VolumeOptions{})
+		volumeMounter, err = plugin.NewMounter(volumeSpec, pod)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"reconstructVolume.NewMounter failed for volume %q (spec.Name: %q) pod %q (UID: %q) with: %v",
@@ -390,7 +386,7 @@ func (rc *reconciler) reconstructVolume(volume podVolume) (rvolume *reconstructe
 		outerVolumeSpecName: volume.volumeSpecName,
 		pod:                 pod,
 		deviceMounter:       deviceMounter,
-		volumeGidValue:      "",
+		volumeGIDValue:      "",
 		// devicePath is updated during updateStates() by checking node status's VolumesAttached data.
 		// TODO: get device path directly from the volume mount path.
 		devicePath:          "",

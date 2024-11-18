@@ -358,6 +358,65 @@ func (_c *MockRuntime_GetContainerLogs_Call) RunAndReturn(run func(context.Conte
 	return _c
 }
 
+// GetContainerStatus provides a mock function with given fields: ctx, id
+func (_m *MockRuntime) GetContainerStatus(ctx context.Context, id container.ContainerID) (*container.Status, error) {
+	ret := _m.Called(ctx, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetContainerStatus")
+	}
+
+	var r0 *container.Status
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, container.ContainerID) (*container.Status, error)); ok {
+		return rf(ctx, id)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, container.ContainerID) *container.Status); ok {
+		r0 = rf(ctx, id)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*container.Status)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, container.ContainerID) error); ok {
+		r1 = rf(ctx, id)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockRuntime_GetContainerStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetContainerStatus'
+type MockRuntime_GetContainerStatus_Call struct {
+	*mock.Call
+}
+
+// GetContainerStatus is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id container.ContainerID
+func (_e *MockRuntime_Expecter) GetContainerStatus(ctx interface{}, id interface{}) *MockRuntime_GetContainerStatus_Call {
+	return &MockRuntime_GetContainerStatus_Call{Call: _e.mock.On("GetContainerStatus", ctx, id)}
+}
+
+func (_c *MockRuntime_GetContainerStatus_Call) Run(run func(ctx context.Context, id container.ContainerID)) *MockRuntime_GetContainerStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(container.ContainerID))
+	})
+	return _c
+}
+
+func (_c *MockRuntime_GetContainerStatus_Call) Return(_a0 *container.Status, _a1 error) *MockRuntime_GetContainerStatus_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockRuntime_GetContainerStatus_Call) RunAndReturn(run func(context.Context, container.ContainerID) (*container.Status, error)) *MockRuntime_GetContainerStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetImageRef provides a mock function with given fields: ctx, image
 func (_m *MockRuntime) GetImageRef(ctx context.Context, image container.ImageSpec) (string, error) {
 	ret := _m.Called(ctx, image)

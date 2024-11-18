@@ -26,6 +26,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strconv"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -121,6 +122,30 @@ func (p *anyObject) UnmarshalCBOR(in []byte) error {
 	return modes.Decode.Unmarshal(in, &p.Value)
 }
 
+type structWithRawFields struct {
+	FieldsV1            metav1.FieldsV1       `json:"f"`
+	FieldsV1Pointer     *metav1.FieldsV1      `json:"fp"`
+	RawExtension        runtime.RawExtension  `json:"r"`
+	RawExtensionPointer *runtime.RawExtension `json:"rp"`
+}
+
+func (structWithRawFields) GetObjectKind() schema.ObjectKind {
+	return schema.EmptyObjectKind
+}
+
+func (structWithRawFields) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+type structWithEmbeddedMetas struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+}
+
+func (structWithEmbeddedMetas) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
 func TestEncode(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -180,6 +205,42 @@ func TestEncode(t *testing.T) {
 			assertOnError: func(t *testing.T, err error) {
 				if err != nil {
 					t.Errorf("expected nil error, got: %v", err)
+				}
+			},
+		},
+		{
+			name: "unsupported marshaler",
+			in:   &textMarshalerObject{},
+			assertOnWriter: func() (io.Writer, func(*testing.T)) {
+				var b bytes.Buffer
+				return &b, func(t *testing.T) {
+					if b.Len() != 0 {
+						t.Errorf("expected no bytes to be written, got %d", b.Len())
+					}
+				}
+			},
+			assertOnError: func(t *testing.T, err error) {
+				if want := "unable to serialize *cbor.textMarshalerObject: *cbor.textMarshalerObject implements encoding.TextMarshaler without corresponding cbor interface"; err == nil || err.Error() != want {
+					t.Errorf("expected error %q, got: %v", want, err)
+				}
+			},
+		},
+		{
+			name: "unsupported marshaler within unstructured content",
+			in: &unstructured.Unstructured{
+				Object: map[string]interface{}{"": textMarshalerObject{}},
+			},
+			assertOnWriter: func() (io.Writer, func(*testing.T)) {
+				var b bytes.Buffer
+				return &b, func(t *testing.T) {
+					if b.Len() != 0 {
+						t.Errorf("expected no bytes to be written, got %d", b.Len())
+					}
+				}
+			},
+			assertOnError: func(t *testing.T, err error) {
+				if want := "unable to serialize map[string]interface {}: cbor.textMarshalerObject implements encoding.TextMarshaler without corresponding cbor interface"; err == nil || err.Error() != want {
+					t.Errorf("expected error %q, got: %v", want, err)
 				}
 			},
 		},
@@ -257,6 +318,70 @@ func TestDecode(t *testing.T) {
 			typer:       stubTyper{gvks: []schema.GroupVersionKind{{Group: "x", Version: "y", Kind: "z"}}},
 			into:        &anyObject{},
 			expectedObj: &anyObject{},
+			expectedGVK: &schema.GroupVersionKind{Group: "x", Version: "y", Kind: "z"},
+			assertOnError: func(t *testing.T, err error) {
+				if err != nil {
+					t.Errorf("expected nil error, got: %v", err)
+				}
+			},
+		},
+		{
+			name:        "raw types transcoded",
+			data:        []byte{0xa4, 0x41, 'f', 0xa1, 0x41, 'a', 0x01, 0x42, 'f', 'p', 0xa1, 0x41, 'z', 0x02, 0x41, 'r', 0xa1, 0x41, 'b', 0x03, 0x42, 'r', 'p', 0xa1, 0x41, 'y', 0x04},
+			gvk:         &schema.GroupVersionKind{},
+			metaFactory: stubMetaFactory{gvk: &schema.GroupVersionKind{}},
+			typer:       stubTyper{gvks: []schema.GroupVersionKind{{Group: "x", Version: "y", Kind: "z"}}},
+			into:        &structWithRawFields{},
+			expectedObj: &structWithRawFields{
+				FieldsV1:            metav1.FieldsV1{Raw: []byte(`{"a":1}`)},
+				FieldsV1Pointer:     &metav1.FieldsV1{Raw: []byte(`{"z":2}`)},
+				RawExtension:        runtime.RawExtension{Raw: []byte(`{"b":3}`)},
+				RawExtensionPointer: &runtime.RawExtension{Raw: []byte(`{"y":4}`)},
+			},
+			expectedGVK: &schema.GroupVersionKind{Group: "x", Version: "y", Kind: "z"},
+			assertOnError: func(t *testing.T, err error) {
+				if err != nil {
+					t.Errorf("expected nil error, got: %v", err)
+				}
+			},
+		},
+		{
+			name:        "raw types not transcoded",
+			options:     []Option{Transcode(false)},
+			data:        []byte{0xa4, 0x41, 'f', 0xa1, 0x41, 'a', 0x01, 0x42, 'f', 'p', 0xa1, 0x41, 'z', 0x02, 0x41, 'r', 0xa1, 0x41, 'b', 0x03, 0x42, 'r', 'p', 0xa1, 0x41, 'y', 0x04},
+			gvk:         &schema.GroupVersionKind{},
+			metaFactory: stubMetaFactory{gvk: &schema.GroupVersionKind{}},
+			typer:       stubTyper{gvks: []schema.GroupVersionKind{{Group: "x", Version: "y", Kind: "z"}}},
+			into:        &structWithRawFields{},
+			expectedObj: &structWithRawFields{
+				FieldsV1:        metav1.FieldsV1{Raw: []byte{0xa1, 0x41, 'a', 0x01}},
+				FieldsV1Pointer: &metav1.FieldsV1{Raw: []byte{0xa1, 0x41, 'z', 0x02}},
+				// RawExtension's UnmarshalCBOR ensures the self-described CBOR tag
+				// is present in the result so that there is never any ambiguity in
+				// distinguishing CBOR from JSON or Protobuf. It is unnecessary for
+				// FieldsV1 to do the same because the initial byte is always
+				// sufficient to distinguish a valid JSON-encoded FieldsV1 from a
+				// valid CBOR-encoded FieldsV1.
+				RawExtension:        runtime.RawExtension{Raw: []byte{0xd9, 0xd9, 0xf7, 0xa1, 0x41, 'b', 0x03}},
+				RawExtensionPointer: &runtime.RawExtension{Raw: []byte{0xd9, 0xd9, 0xf7, 0xa1, 0x41, 'y', 0x04}},
+			},
+			expectedGVK: &schema.GroupVersionKind{Group: "x", Version: "y", Kind: "z"},
+			assertOnError: func(t *testing.T, err error) {
+				if err != nil {
+					t.Errorf("expected nil error, got: %v", err)
+				}
+			},
+		},
+		{
+			name:        "object with embedded typemeta and objectmeta",
+			data:        []byte("\xa2\x48metadata\xa1\x44name\x43foo\x44spec\xa0"), // {"metadata": {"name": "foo"}}
+			gvk:         &schema.GroupVersionKind{},
+			metaFactory: stubMetaFactory{gvk: &schema.GroupVersionKind{}},
+			typer:       stubTyper{gvks: []schema.GroupVersionKind{{Group: "x", Version: "y", Kind: "z"}}},
+			into:        &structWithEmbeddedMetas{},
+			expectedObj: &structWithEmbeddedMetas{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+			},
 			expectedGVK: &schema.GroupVersionKind{Group: "x", Version: "y", Kind: "z"},
 			assertOnError: func(t *testing.T, err error) {
 				if err != nil {
@@ -564,6 +689,19 @@ func TestDecode(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:        "into unsupported marshaler",
+			data:        []byte("\xa0"),
+			into:        &textMarshalerObject{},
+			metaFactory: stubMetaFactory{gvk: &schema.GroupVersionKind{}},
+			typer:       stubTyper{gvks: []schema.GroupVersionKind{{Version: "v", Kind: "k"}}},
+			expectedGVK: &schema.GroupVersionKind{Version: "v", Kind: "k"},
+			assertOnError: func(t *testing.T, err error) {
+				if want := "unable to serialize *cbor.textMarshalerObject: *cbor.textMarshalerObject implements encoding.TextMarshaler without corresponding cbor interface"; err == nil || err.Error() != want {
+					t.Errorf("expected error %q, got: %v", want, err)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSerializer(tc.metaFactory, tc.creater, tc.typer, tc.options...)
@@ -580,6 +718,20 @@ func TestDecode(t *testing.T) {
 			}
 		})
 	}
+}
+
+type textMarshalerObject struct{}
+
+func (p textMarshalerObject) GetObjectKind() schema.ObjectKind {
+	return schema.EmptyObjectKind
+}
+
+func (textMarshalerObject) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+func (textMarshalerObject) MarshalText() ([]byte, error) {
+	return nil, nil
 }
 
 func TestMetaFactoryInterpret(t *testing.T) {
@@ -637,4 +789,99 @@ type stubMetaFactory struct {
 
 func (mf stubMetaFactory) Interpret([]byte) (*schema.GroupVersionKind, error) {
 	return mf.gvk, mf.err
+}
+
+type oneMapField struct {
+	metav1.TypeMeta `json:",inline"`
+	Map             map[string]interface{} `json:"map"`
+}
+
+func (o oneMapField) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+func (o oneMapField) GetObjectKind() schema.ObjectKind {
+	panic("unimplemented")
+}
+
+type eightStringFields struct {
+	metav1.TypeMeta `json:",inline"`
+	A               string `json:"1"`
+	B               string `json:"2"`
+	C               string `json:"3"`
+	D               string `json:"4"`
+	E               string `json:"5"`
+	F               string `json:"6"`
+	G               string `json:"7"`
+	H               string `json:"8"`
+}
+
+func (o eightStringFields) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+func (o eightStringFields) GetObjectKind() schema.ObjectKind {
+	panic("unimplemented")
+}
+
+// TestEncodeNondeterministic tests that repeated encodings of multi-field structs and maps do not
+// encode to precisely the same bytes when repeatedly encoded with EncodeNondeterministic. When
+// using EncodeNondeterministic, the order of items in CBOR maps should be intentionally shuffled to
+// prevent applications from inadvertently depending on encoding determinism. All permutations do
+// not necessarily have equal probability.
+func TestEncodeNondeterministic(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input runtime.Object
+	}{
+		{
+			name: "map",
+			input: func() runtime.Object {
+				m := map[string]interface{}{}
+				for i := 1; i <= 8; i++ {
+					m[strconv.Itoa(i)] = strconv.Itoa(i)
+
+				}
+				return oneMapField{Map: m}
+			}(),
+		},
+		{
+			name: "struct",
+			input: eightStringFields{
+				TypeMeta: metav1.TypeMeta{},
+				A:        "1",
+				B:        "2",
+				C:        "3",
+				D:        "4",
+				E:        "5",
+				F:        "6",
+				G:        "7",
+				H:        "8",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b bytes.Buffer
+			e := NewSerializer(nil, nil)
+
+			if err := e.EncodeNondeterministic(tc.input, &b); err != nil {
+				t.Fatal(err)
+			}
+			first := b.String()
+
+			const Trials = 128
+			for trial := 0; trial < Trials; trial++ {
+				b.Reset()
+				if err := e.EncodeNondeterministic(tc.input, &b); err != nil {
+					t.Fatal(err)
+				}
+
+				if !bytes.Equal([]byte(first), b.Bytes()) {
+					return
+				}
+			}
+			t.Fatalf("nondeterministic encode produced the same bytes on %d consecutive calls: %s", Trials, first)
+		})
+	}
+
 }

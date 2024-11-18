@@ -22,7 +22,7 @@ package v1beta1
 // with apply.
 type IngressRuleApplyConfiguration struct {
 	Host                               *string `json:"host,omitempty"`
-	IngressRuleValueApplyConfiguration `json:",omitempty,inline"`
+	IngressRuleValueApplyConfiguration `json:",inline"`
 }
 
 // IngressRuleApplyConfiguration constructs a declarative configuration of the IngressRule type for use with
@@ -43,6 +43,6 @@ func (b *IngressRuleApplyConfiguration) WithHost(value string) *IngressRuleApply
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the HTTP field is set to the value of the last call.
 func (b *IngressRuleApplyConfiguration) WithHTTP(value *HTTPIngressRuleValueApplyConfiguration) *IngressRuleApplyConfiguration {
-	b.HTTP = value
+	b.IngressRuleValueApplyConfiguration.HTTP = value
 	return b
 }

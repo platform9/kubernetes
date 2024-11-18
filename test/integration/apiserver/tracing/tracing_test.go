@@ -208,7 +208,7 @@ func TestAPIServerTracingWithEgressSelector(t *testing.T) {
 	defer os.Remove(egressSelectorConfigFile.Name())
 
 	if err := os.WriteFile(egressSelectorConfigFile.Name(), []byte(`
-apiVersion: apiserver.config.k8s.io/v1beta1
+apiVersion: apiserver.k8s.io/v1beta1
 kind: EgressSelectorConfiguration
 egressSelections:
 - name: cluster
@@ -311,7 +311,7 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 				{
 					name: "POST /api/v1/nodes",
 					attributes: map[string]func(*commonv1.AnyValue) bool{
-						"http.user_agent": func(v *commonv1.AnyValue) bool {
+						"user_agent.original": func(v *commonv1.AnyValue) bool {
 							return strings.HasPrefix(v.GetStringValue(), "tracing.test")
 						},
 						"http.target": func(v *commonv1.AnyValue) bool {
@@ -430,7 +430,7 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 				{
 					name: "GET /api/v1/nodes/{:name}",
 					attributes: map[string]func(*commonv1.AnyValue) bool{
-						"http.user_agent": func(v *commonv1.AnyValue) bool {
+						"user_agent.original": func(v *commonv1.AnyValue) bool {
 							return strings.HasPrefix(v.GetStringValue(), "tracing.test")
 						},
 						"http.target": func(v *commonv1.AnyValue) bool {
@@ -470,6 +470,23 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 						"About to Get from storage",
 						"About to write a response",
 						"Writing http response done",
+					},
+				},
+				{
+					name: "cacher.Get",
+					attributes: map[string]func(*commonv1.AnyValue) bool{
+						"audit-id": func(v *commonv1.AnyValue) bool {
+							return v.GetStringValue() != ""
+						},
+						"key": func(v *commonv1.AnyValue) bool {
+							return v.GetStringValue() == "/minions/fake"
+						},
+						"resource-version": func(v *commonv1.AnyValue) bool {
+							return v.GetStringValue() == ""
+						},
+					},
+					events: []string{
+						"About to Get from underlying storage",
 					},
 				},
 				{
@@ -520,7 +537,7 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 				{
 					name: "GET /api/v1/nodes",
 					attributes: map[string]func(*commonv1.AnyValue) bool{
-						"http.user_agent": func(v *commonv1.AnyValue) bool {
+						"user_agent.original": func(v *commonv1.AnyValue) bool {
 							return strings.HasPrefix(v.GetStringValue(), "tracing.test")
 						},
 						"http.target": func(v *commonv1.AnyValue) bool {
@@ -560,6 +577,22 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 						"About to List from storage",
 						"Listing from storage done",
 						"Writing http response done",
+					},
+				},
+				{
+					name: "cacher.GetList",
+					attributes: map[string]func(*commonv1.AnyValue) bool{
+						"audit-id": func(v *commonv1.AnyValue) bool {
+							return v.GetStringValue() != ""
+						},
+						"type": func(v *commonv1.AnyValue) bool {
+							return v.GetStringValue() == "nodes"
+						},
+					},
+					events: []string{
+						"Ready",
+						"Listed items from cache",
+						"Filtered items",
 					},
 				},
 				{
@@ -606,7 +639,7 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 				{
 					name: "PUT /api/v1/nodes/{:name}",
 					attributes: map[string]func(*commonv1.AnyValue) bool{
-						"http.user_agent": func(v *commonv1.AnyValue) bool {
+						"user_agent.original": func(v *commonv1.AnyValue) bool {
 							return strings.HasPrefix(v.GetStringValue(), "tracing.test")
 						},
 						"http.target": func(v *commonv1.AnyValue) bool {
@@ -750,7 +783,7 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 				{
 					name: "PATCH /api/v1/nodes/{:name}",
 					attributes: map[string]func(*commonv1.AnyValue) bool{
-						"http.user_agent": func(v *commonv1.AnyValue) bool {
+						"user_agent.original": func(v *commonv1.AnyValue) bool {
 							return strings.HasPrefix(v.GetStringValue(), "tracing.test")
 						},
 						"http.target": func(v *commonv1.AnyValue) bool {
@@ -871,7 +904,7 @@ endpoint: %s`, listener.Addr().String())), os.FileMode(0755)); err != nil {
 				{
 					name: "DELETE /api/v1/nodes/{:name}",
 					attributes: map[string]func(*commonv1.AnyValue) bool{
-						"http.user_agent": func(v *commonv1.AnyValue) bool {
+						"user_agent.original": func(v *commonv1.AnyValue) bool {
 							return strings.HasPrefix(v.GetStringValue(), "tracing.test")
 						},
 						"http.target": func(v *commonv1.AnyValue) bool {

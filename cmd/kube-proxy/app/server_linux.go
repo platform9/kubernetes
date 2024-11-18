@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	goruntime "runtime"
-	"strings"
 	"time"
 
 	"github.com/google/cadvisor/machine"
@@ -94,7 +93,8 @@ func (s *ProxyServer) platformSetup(ctx context.Context) error {
 		logger.Info("NodeInfo", "podCIDRs", node.Spec.PodCIDRs)
 	}
 
-	err := s.setupConntrack(ctx)
+	ct := &realConntracker{}
+	err := s.setupConntrack(ctx, ct)
 	if err != nil {
 		return err
 	}
@@ -178,9 +178,9 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 				ipt,
 				utilsysctl.New(),
 				exec.New(),
-				config.IPTables.SyncPeriod.Duration,
-				config.IPTables.MinSyncPeriod.Duration,
-				config.IPTables.MasqueradeAll,
+				config.SyncPeriod.Duration,
+				config.MinSyncPeriod.Duration,
+				config.Linux.MasqueradeAll,
 				*config.IPTables.LocalhostNodePorts,
 				int(*config.IPTables.MasqueradeBit),
 				localDetectors,
@@ -202,9 +202,9 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 				iptInterface,
 				utilsysctl.New(),
 				exec.New(),
-				config.IPTables.SyncPeriod.Duration,
-				config.IPTables.MinSyncPeriod.Duration,
-				config.IPTables.MasqueradeAll,
+				config.SyncPeriod.Duration,
+				config.MinSyncPeriod.Duration,
+				config.Linux.MasqueradeAll,
 				*config.IPTables.LocalhostNodePorts,
 				int(*config.IPTables.MasqueradeBit),
 				localDetectors[s.PrimaryIPFamily],
@@ -238,14 +238,14 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 				ipsetInterface,
 				utilsysctl.New(),
 				execer,
-				config.IPVS.SyncPeriod.Duration,
-				config.IPVS.MinSyncPeriod.Duration,
+				config.SyncPeriod.Duration,
+				config.MinSyncPeriod.Duration,
 				config.IPVS.ExcludeCIDRs,
 				config.IPVS.StrictARP,
 				config.IPVS.TCPTimeout.Duration,
 				config.IPVS.TCPFinTimeout.Duration,
 				config.IPVS.UDPTimeout.Duration,
-				config.IPTables.MasqueradeAll,
+				config.Linux.MasqueradeAll,
 				int(*config.IPTables.MasqueradeBit),
 				localDetectors,
 				s.Hostname,
@@ -266,14 +266,14 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 				ipsetInterface,
 				utilsysctl.New(),
 				execer,
-				config.IPVS.SyncPeriod.Duration,
-				config.IPVS.MinSyncPeriod.Duration,
+				config.SyncPeriod.Duration,
+				config.MinSyncPeriod.Duration,
 				config.IPVS.ExcludeCIDRs,
 				config.IPVS.StrictARP,
 				config.IPVS.TCPTimeout.Duration,
 				config.IPVS.TCPFinTimeout.Duration,
 				config.IPVS.UDPTimeout.Duration,
-				config.IPTables.MasqueradeAll,
+				config.Linux.MasqueradeAll,
 				int(*config.IPTables.MasqueradeBit),
 				localDetectors[s.PrimaryIPFamily],
 				s.Hostname,
@@ -295,9 +295,9 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 			// TODO this has side effects that should only happen when Run() is invoked.
 			proxier, err = nftables.NewDualStackProxier(
 				ctx,
-				config.NFTables.SyncPeriod.Duration,
-				config.NFTables.MinSyncPeriod.Duration,
-				config.NFTables.MasqueradeAll,
+				config.SyncPeriod.Duration,
+				config.MinSyncPeriod.Duration,
+				config.Linux.MasqueradeAll,
 				int(*config.NFTables.MasqueradeBit),
 				localDetectors,
 				s.Hostname,
@@ -313,9 +313,9 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 			proxier, err = nftables.NewProxier(
 				ctx,
 				s.PrimaryIPFamily,
-				config.NFTables.SyncPeriod.Duration,
-				config.NFTables.MinSyncPeriod.Duration,
-				config.NFTables.MasqueradeAll,
+				config.SyncPeriod.Duration,
+				config.MinSyncPeriod.Duration,
+				config.Linux.MasqueradeAll,
 				int(*config.NFTables.MasqueradeBit),
 				localDetectors[s.PrimaryIPFamily],
 				s.Hostname,
@@ -335,10 +335,8 @@ func (s *ProxyServer) createProxier(ctx context.Context, config *proxyconfigapi.
 	return proxier, nil
 }
 
-func (s *ProxyServer) setupConntrack(ctx context.Context) error {
-	ct := &realConntracker{}
-
-	max, err := getConntrackMax(ctx, s.Config.Conntrack)
+func (s *ProxyServer) setupConntrack(ctx context.Context, ct Conntracker) error {
+	max, err := getConntrackMax(ctx, s.Config.Linux.Conntrack)
 	if err != nil {
 		return err
 	}
@@ -361,35 +359,35 @@ func (s *ProxyServer) setupConntrack(ctx context.Context) error {
 		}
 	}
 
-	if s.Config.Conntrack.TCPEstablishedTimeout != nil && s.Config.Conntrack.TCPEstablishedTimeout.Duration > 0 {
-		timeout := int(s.Config.Conntrack.TCPEstablishedTimeout.Duration / time.Second)
+	if s.Config.Linux.Conntrack.TCPEstablishedTimeout != nil && s.Config.Linux.Conntrack.TCPEstablishedTimeout.Duration > 0 {
+		timeout := int(s.Config.Linux.Conntrack.TCPEstablishedTimeout.Duration / time.Second)
 		if err := ct.SetTCPEstablishedTimeout(ctx, timeout); err != nil {
 			return err
 		}
 	}
 
-	if s.Config.Conntrack.TCPCloseWaitTimeout != nil && s.Config.Conntrack.TCPCloseWaitTimeout.Duration > 0 {
-		timeout := int(s.Config.Conntrack.TCPCloseWaitTimeout.Duration / time.Second)
+	if s.Config.Linux.Conntrack.TCPCloseWaitTimeout != nil && s.Config.Linux.Conntrack.TCPCloseWaitTimeout.Duration > 0 {
+		timeout := int(s.Config.Linux.Conntrack.TCPCloseWaitTimeout.Duration / time.Second)
 		if err := ct.SetTCPCloseWaitTimeout(ctx, timeout); err != nil {
 			return err
 		}
 	}
 
-	if s.Config.Conntrack.TCPBeLiberal {
+	if s.Config.Linux.Conntrack.TCPBeLiberal {
 		if err := ct.SetTCPBeLiberal(ctx, 1); err != nil {
 			return err
 		}
 	}
 
-	if s.Config.Conntrack.UDPTimeout.Duration > 0 {
-		timeout := int(s.Config.Conntrack.UDPTimeout.Duration / time.Second)
+	if s.Config.Linux.Conntrack.UDPTimeout.Duration > 0 {
+		timeout := int(s.Config.Linux.Conntrack.UDPTimeout.Duration / time.Second)
 		if err := ct.SetUDPTimeout(ctx, timeout); err != nil {
 			return err
 		}
 	}
 
-	if s.Config.Conntrack.UDPStreamTimeout.Duration > 0 {
-		timeout := int(s.Config.Conntrack.UDPStreamTimeout.Duration / time.Second)
+	if s.Config.Linux.Conntrack.UDPStreamTimeout.Duration > 0 {
+		timeout := int(s.Config.Linux.Conntrack.UDPStreamTimeout.Duration / time.Second)
 		if err := ct.SetUDPStreamTimeout(ctx, timeout); err != nil {
 			return err
 		}
@@ -477,12 +475,11 @@ func getLocalDetectors(logger klog.Logger, primaryIPFamily v1.IPFamily, config *
 
 	switch config.DetectLocalMode {
 	case proxyconfigapi.LocalModeClusterCIDR:
-		clusterCIDRs := strings.Split(strings.TrimSpace(config.ClusterCIDR), ",")
-		for family, cidrs := range proxyutil.MapCIDRsByIPFamily(clusterCIDRs) {
+		for family, cidrs := range proxyutil.MapCIDRsByIPFamily(config.DetectLocal.ClusterCIDRs) {
 			localDetectors[family] = proxyutil.NewDetectLocalByCIDR(cidrs[0].String())
 		}
 		if !localDetectors[primaryIPFamily].IsImplemented() {
-			logger.Info("Detect-local-mode set to ClusterCIDR, but no cluster CIDR specified for primary IP family", "ipFamily", primaryIPFamily, "clusterCIDR", config.ClusterCIDR)
+			logger.Info("Detect-local-mode set to ClusterCIDR, but no cluster CIDR specified for primary IP family", "ipFamily", primaryIPFamily, "clusterCIDRs", config.DetectLocal.ClusterCIDRs)
 		}
 
 	case proxyconfigapi.LocalModeNodeCIDR:

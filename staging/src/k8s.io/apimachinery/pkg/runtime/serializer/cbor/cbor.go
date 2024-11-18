@@ -55,20 +55,40 @@ func (mf *defaultMetaFactory) Interpret(data []byte) (*schema.GroupVersionKind, 
 
 type Serializer interface {
 	runtime.Serializer
+	runtime.NondeterministicEncoder
 	recognizer.RecognizingDecoder
+
+	// NewSerializer returns a value of this interface type rather than exporting the serializer
+	// type and returning one of those because the zero value of serializer isn't ready to
+	// use. Users aren't intended to implement cbor.Serializer themselves, and this unexported
+	// interface method is here to prevent that (https://go.dev/blog/module-compatibility).
+	private()
 }
 
 var _ Serializer = &serializer{}
 
 type options struct {
-	strict bool
+	strict    bool
+	transcode bool
 }
 
 type Option func(*options)
 
+// Strict configures a serializer to return a strict decoding error when it encounters map keys that
+// do not correspond to a field in the target object of a decode operation. This option is disabled
+// by default.
 func Strict(s bool) Option {
 	return func(opts *options) {
 		opts.strict = s
+	}
+}
+
+// Transcode configures a serializer to transcode the "raw" bytes of a decoded runtime.RawExtension
+// or metav1.FieldsV1 object to JSON. This is enabled by default to support existing programs that
+// depend on the assumption that objects of either type contain valid JSON.
+func Transcode(s bool) Option {
+	return func(opts *options) {
+		opts.transcode = s
 	}
 }
 
@@ -79,6 +99,10 @@ type serializer struct {
 	options     options
 }
 
+func (serializer) private() {}
+
+// NewSerializer creates and returns a serializer configured with the provided options. The default
+// options are equivalent to explicitly passing Strict(false) and Transcode(true).
 func NewSerializer(creater runtime.ObjectCreater, typer runtime.ObjectTyper, options ...Option) Serializer {
 	return newSerializer(&defaultMetaFactory{}, creater, typer, options...)
 }
@@ -89,6 +113,7 @@ func newSerializer(metaFactory metaFactory, creater runtime.ObjectCreater, typer
 		creater:     creater,
 		typer:       typer,
 	}
+	s.options.transcode = true
 	for _, o := range options {
 		o(&s.options)
 	}
@@ -99,16 +124,43 @@ func (s *serializer) Identifier() runtime.Identifier {
 	return "cbor"
 }
 
+// Encode writes a CBOR representation of the given object.
+//
+// Because the CBOR data item written by a call to Encode is always enclosed in the "self-described
+// CBOR" tag, its encoded form always has the prefix 0xd9d9f7. This prefix is suitable for use as a
+// "magic number" for distinguishing encoded CBOR from other protocols.
+//
+// The default serialization behavior for any given object replicates the behavior of the JSON
+// serializer as far as it is necessary to allow the CBOR serializer to be used as a drop-in
+// replacement for the JSON serializer, with limited exceptions. For example, the distinction
+// between integers and floating-point numbers is preserved in CBOR due to its distinct
+// representations for each type.
+//
+// Objects implementing runtime.Unstructured will have their unstructured content encoded rather
+// than following the default behavior for their dynamic type.
 func (s *serializer) Encode(obj runtime.Object, w io.Writer) error {
+	return s.encode(modes.Encode, obj, w)
+}
+
+func (s *serializer) EncodeNondeterministic(obj runtime.Object, w io.Writer) error {
+	return s.encode(modes.EncodeNondeterministic, obj, w)
+}
+
+func (s *serializer) encode(mode modes.EncMode, obj runtime.Object, w io.Writer) error {
+	var v interface{} = obj
+	if u, ok := obj.(runtime.Unstructured); ok {
+		v = u.UnstructuredContent()
+	}
+
+	if err := modes.RejectCustomMarshalers(v); err != nil {
+		return err
+	}
+
 	if _, err := w.Write(selfDescribedCBOR); err != nil {
 		return err
 	}
 
-	e := modes.Encode.NewEncoder(w)
-	if u, ok := obj.(runtime.Unstructured); ok {
-		return e.Encode(u.UnstructuredContent())
-	}
-	return e.Encode(obj)
+	return mode.MarshalTo(v, w)
 }
 
 // gvkWithDefaults returns group kind and version defaulting from provided default
@@ -218,6 +270,8 @@ func (s *serializer) unmarshal(data []byte, into interface{}) (strict, lax error
 			}
 		}()
 		into = &content
+	} else if err := modes.RejectCustomMarshalers(into); err != nil {
+		return nil, err
 	}
 
 	if !s.options.strict {
@@ -298,6 +352,13 @@ func (s *serializer) Decode(data []byte, gvk *schema.GroupVersionKind, into runt
 	if err != nil {
 		return nil, actual, err
 	}
+
+	if s.options.transcode {
+		if err := transcodeRawTypes(obj); err != nil {
+			return nil, actual, err
+		}
+	}
+
 	return obj, actual, strict
 }
 
@@ -310,4 +371,19 @@ var selfDescribedCBOR = []byte{0xd9, 0xd9, 0xf7}
 
 func (s *serializer) RecognizesData(data []byte) (ok, unknown bool, err error) {
 	return bytes.HasPrefix(data, selfDescribedCBOR), false, nil
+}
+
+// NewSerializerInfo returns a default SerializerInfo for CBOR using the given creater and typer.
+func NewSerializerInfo(creater runtime.ObjectCreater, typer runtime.ObjectTyper) runtime.SerializerInfo {
+	return runtime.SerializerInfo{
+		MediaType:        "application/cbor",
+		MediaTypeType:    "application",
+		MediaTypeSubType: "cbor",
+		Serializer:       NewSerializer(creater, typer),
+		StrictSerializer: NewSerializer(creater, typer, Strict(true)),
+		StreamSerializer: &runtime.StreamSerializerInfo{
+			Framer:     NewFramer(),
+			Serializer: NewSerializer(creater, typer, Transcode(false)),
+		},
+	}
 }

@@ -285,7 +285,7 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 
 func clientIPHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("GET /clientip")
-	fmt.Fprintf(w, r.RemoteAddr)
+	fmt.Fprint(w, r.RemoteAddr)
 }
 func headerHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.FormValue("key")
@@ -727,7 +727,6 @@ func startSCTPServer(sctpPort int) {
 
 func getHostName() string {
 	hostName, err := os.Hostname()
-	log.Printf("hostname: %s", hostName)
 	assertNoError(err, "failed to get hostname")
 	return hostName
 }

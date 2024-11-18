@@ -93,16 +93,16 @@ func TestSummaryProviderGetStatsNoSplitFileSystem(t *testing.T) {
 	summary, err := provider.Get(ctx, true)
 	assert.NoError(err)
 
-	assert.Equal(summary.Node.NodeName, "test-node")
+	assert.Equal("test-node", summary.Node.NodeName)
 	assert.Equal(summary.Node.StartTime, systemBootTime)
 	assert.Equal(summary.Node.CPU, cgroupStatsMap["/"].cs.CPU)
 	assert.Equal(summary.Node.Memory, cgroupStatsMap["/"].cs.Memory)
 	assert.Equal(summary.Node.Swap, cgroupStatsMap["/"].cs.Swap)
 	assert.Equal(summary.Node.Network, cgroupStatsMap["/"].ns)
 	assert.Equal(summary.Node.Fs, rootFsStats)
-	assert.Equal(summary.Node.Runtime, &statsapi.RuntimeStats{ContainerFs: imageFsStats, ImageFs: imageFsStats})
+	assert.Equal(&statsapi.RuntimeStats{ContainerFs: imageFsStats, ImageFs: imageFsStats}, summary.Node.Runtime)
 
-	assert.Equal(len(summary.Node.SystemContainers), 4)
+	assert.Len(summary.Node.SystemContainers, 4)
 	assert.Contains(summary.Node.SystemContainers, statsapi.ContainerStats{
 		Name:               "kubelet",
 		StartTime:          kubeletCreationTime,
@@ -189,7 +189,7 @@ func TestSummaryProviderGetStatsSplitImageFs(t *testing.T) {
 	summary, err := provider.Get(ctx, true)
 	assert.NoError(err)
 
-	assert.Equal(summary.Node.NodeName, "test-node")
+	assert.Equal("test-node", summary.Node.NodeName)
 	assert.Equal(summary.Node.StartTime, systemBootTime)
 	assert.Equal(summary.Node.CPU, cgroupStatsMap["/"].cs.CPU)
 	assert.Equal(summary.Node.Memory, cgroupStatsMap["/"].cs.Memory)
@@ -197,9 +197,9 @@ func TestSummaryProviderGetStatsSplitImageFs(t *testing.T) {
 	assert.Equal(summary.Node.Network, cgroupStatsMap["/"].ns)
 	assert.Equal(summary.Node.Fs, rootFsStats)
 	// Since we are a split filesystem we want root filesystem to be container fs and image to be image filesystem
-	assert.Equal(summary.Node.Runtime, &statsapi.RuntimeStats{ContainerFs: rootFsStats, ImageFs: imageFsStats})
+	assert.Equal(&statsapi.RuntimeStats{ContainerFs: rootFsStats, ImageFs: imageFsStats}, summary.Node.Runtime)
 
-	assert.Equal(len(summary.Node.SystemContainers), 4)
+	assert.Len(summary.Node.SystemContainers, 4)
 	assert.Contains(summary.Node.SystemContainers, statsapi.ContainerStats{
 		Name:               "kubelet",
 		StartTime:          kubeletCreationTime,
@@ -276,7 +276,7 @@ func TestSummaryProviderGetCPUAndMemoryStats(t *testing.T) {
 	summary, err := provider.GetCPUAndMemoryStats(ctx)
 	assert.NoError(err)
 
-	assert.Equal(summary.Node.NodeName, "test-node")
+	assert.Equal("test-node", summary.Node.NodeName)
 	assert.Equal(summary.Node.StartTime, cgroupStatsMap["/"].cs.StartTime)
 	assert.Equal(summary.Node.CPU, cgroupStatsMap["/"].cs.CPU)
 	assert.Equal(summary.Node.Memory, cgroupStatsMap["/"].cs.Memory)
@@ -284,7 +284,7 @@ func TestSummaryProviderGetCPUAndMemoryStats(t *testing.T) {
 	assert.Nil(summary.Node.Fs)
 	assert.Nil(summary.Node.Runtime)
 
-	assert.Equal(len(summary.Node.SystemContainers), 4)
+	assert.Len(summary.Node.SystemContainers, 4)
 	assert.Contains(summary.Node.SystemContainers, statsapi.ContainerStats{
 		Name:      "kubelet",
 		StartTime: cgroupStatsMap["/kubelet"].cs.StartTime,

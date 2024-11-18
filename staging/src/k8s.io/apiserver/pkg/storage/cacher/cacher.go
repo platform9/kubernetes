@@ -492,7 +492,7 @@ func (c *Cacher) Create(ctx context.Context, key string, obj, out runtime.Object
 // Delete implements storage.Interface.
 func (c *Cacher) Delete(
 	ctx context.Context, key string, out runtime.Object, preconditions *storage.Preconditions,
-	validateDeletion storage.ValidateObjectFunc, _ runtime.Object) error {
+	validateDeletion storage.ValidateObjectFunc, _ runtime.Object, opts storage.DeleteOptions) error {
 	// Ignore the suggestion and try to pass down the current version of the object
 	// read from cache.
 	if elem, exists, err := c.watchCache.GetByKey(key); err != nil {
@@ -501,10 +501,10 @@ func (c *Cacher) Delete(
 		// DeepCopy the object since we modify resource version when serializing the
 		// current object.
 		currObj := elem.(*storeElement).Object.DeepCopyObject()
-		return c.storage.Delete(ctx, key, out, preconditions, validateDeletion, currObj)
+		return c.storage.Delete(ctx, key, out, preconditions, validateDeletion, currObj, opts)
 	}
 	// If we couldn't get the object, fallback to no-suggestion.
-	return c.storage.Delete(ctx, key, out, preconditions, validateDeletion, nil)
+	return c.storage.Delete(ctx, key, out, preconditions, validateDeletion, nil, opts)
 }
 
 type namespacedName struct {
@@ -615,7 +615,7 @@ func (c *Cacher) Watch(ctx context.Context, key string, opts storage.ListOptions
 	// to compute watcher.forget function (which has to happen under lock).
 	watcher := newCacheWatcher(
 		chanSize,
-		filterWithAttrsFunction(key, pred),
+		filterWithAttrsAndPrefixFunction(key, pred),
 		emptyFunc,
 		c.versioner,
 		deadline,
@@ -652,6 +652,8 @@ func (c *Cacher) Watch(ctx context.Context, key string, opts storage.ListOptions
 		// rather than a directly returned error.
 		return newErrWatcher(err), nil
 	}
+
+	c.setInitialEventsEndBookmarkIfRequested(cacheInterval, opts, c.watchCache.resourceVersion)
 
 	addedWatcher := false
 	func() {
@@ -693,9 +695,15 @@ func (c *Cacher) Watch(ctx context.Context, key string, opts storage.ListOptions
 
 // Get implements storage.Interface.
 func (c *Cacher) Get(ctx context.Context, key string, opts storage.GetOptions, objPtr runtime.Object) error {
+	ctx, span := tracing.Start(ctx, "cacher.Get",
+		attribute.String("audit-id", audit.GetAuditIDTruncated(ctx)),
+		attribute.String("key", key),
+		attribute.String("resource-version", opts.ResourceVersion))
+	defer span.End(500 * time.Millisecond)
 	if opts.ResourceVersion == "" {
 		// If resourceVersion is not specified, serve it from underlying
 		// storage (for backward compatibility).
+		span.AddEvent("About to Get from underlying storage")
 		return c.storage.Get(ctx, key, opts, objPtr)
 	}
 
@@ -703,6 +711,7 @@ func (c *Cacher) Get(ctx context.Context, key string, opts storage.GetOptions, o
 		if !c.ready.check() {
 			// If Cache is not initialized, delegate Get requests to storage
 			// as described in https://kep.k8s.io/4568
+			span.AddEvent("About to Get from underlying storage - cache not initialized")
 			return c.storage.Get(ctx, key, opts, objPtr)
 		}
 	}
@@ -722,6 +731,7 @@ func (c *Cacher) Get(ctx context.Context, key string, opts storage.GetOptions, o
 		if getRV == 0 && !c.ready.check() {
 			// If Cacher is not yet initialized and we don't require any specific
 			// minimal resource version, simply forward the request to storage.
+			span.AddEvent("About to Get from underlying storage - cache not initialized and no resourceVersion set")
 			return c.storage.Get(ctx, key, opts, objPtr)
 		}
 		if err := c.ready.wait(ctx); err != nil {
@@ -734,6 +744,7 @@ func (c *Cacher) Get(ctx context.Context, key string, opts storage.GetOptions, o
 		return err
 	}
 
+	span.AddEvent("About to fetch object from cache")
 	obj, exists, readResourceVersion, err := c.watchCache.WaitUntilFreshAndGet(ctx, getRV, key)
 	if err != nil {
 		return err
@@ -768,12 +779,26 @@ func shouldDelegateList(opts storage.ListOptions) bool {
 	consistentReadFromStorage := resourceVersion == "" && !(consistentListFromCacheEnabled && requestWatchProgressSupported)
 	// Watch cache doesn't support continuations, so serve them from etcd.
 	hasContinuation := len(pred.Continue) > 0
-	// Serve paginated requests about revision "0" from watch cache to avoid overwhelming etcd.
-	hasLimit := pred.Limit > 0 && resourceVersion != "0"
 	// Watch cache only supports ResourceVersionMatchNotOlderThan (default).
-	unsupportedMatch := match != "" && match != metav1.ResourceVersionMatchNotOlderThan
+	// see https://kubernetes.io/docs/reference/using-api/api-concepts/#semantics-for-get-and-list
+	isLegacyExactMatch := opts.Predicate.Limit > 0 && match == "" && len(resourceVersion) > 0 && resourceVersion != "0"
+	unsupportedMatch := match != "" && match != metav1.ResourceVersionMatchNotOlderThan || isLegacyExactMatch
 
-	return consistentReadFromStorage || hasContinuation || hasLimit || unsupportedMatch
+	return consistentReadFromStorage || hasContinuation || unsupportedMatch
+}
+
+// computeListLimit determines whether the cacher should
+// apply a limit to an incoming LIST request and returns its value.
+//
+// note that this function doesn't check RVM nor the Continuation token.
+// these parameters are validated by the shouldDelegateList function.
+//
+// as of today, the limit is ignored for requests that set RV == 0
+func computeListLimit(opts storage.ListOptions) int64 {
+	if opts.Predicate.Limit <= 0 || opts.ResourceVersion == "0" {
+		return 0
+	}
+	return opts.Predicate.Limit
 }
 
 func shouldDelegateListOnNotReadyCache(opts storage.ListOptions) bool {
@@ -795,7 +820,7 @@ func (c *Cacher) listItems(ctx context.Context, listRV uint64, key string, pred 
 		}
 		return nil, readResourceVersion, "", nil
 	}
-	return c.watchCache.WaitUntilFreshAndList(ctx, listRV, pred.MatcherIndex(ctx))
+	return c.watchCache.WaitUntilFreshAndList(ctx, listRV, key, pred.MatcherIndex(ctx))
 }
 
 // GetList implements storage.Interface
@@ -834,14 +859,15 @@ func (c *Cacher) GetList(ctx context.Context, key string, opts storage.ListOptio
 		preparedKey += "/"
 	}
 	requestWatchProgressSupported := etcdfeature.DefaultFeatureSupportChecker.Supports(storage.RequestWatchProgress)
-	if resourceVersion == "" && utilfeature.DefaultFeatureGate.Enabled(features.ConsistentListFromCache) && requestWatchProgressSupported {
+	consistentRead := resourceVersion == "" && utilfeature.DefaultFeatureGate.Enabled(features.ConsistentListFromCache) && requestWatchProgressSupported
+	if consistentRead {
 		listRV, err = storage.GetCurrentResourceVersionFromStorage(ctx, c.storage, c.newListFunc, c.resourcePrefix, c.objectType.String())
 		if err != nil {
 			return err
 		}
 	}
 
-	ctx, span := tracing.Start(ctx, "cacher list",
+	ctx, span := tracing.Start(ctx, "cacher.GetList",
 		attribute.String("audit-id", audit.GetAuditIDTruncated(ctx)),
 		attribute.Stringer("type", c.groupResource))
 	defer span.End(500 * time.Millisecond)
@@ -871,11 +897,25 @@ func (c *Cacher) GetList(ctx context.Context, key string, opts storage.ListOptio
 	if listVal.Kind() != reflect.Slice {
 		return fmt.Errorf("need a pointer to slice, got %v", listVal.Kind())
 	}
-	filter := filterWithAttrsFunction(preparedKey, pred)
 
 	objs, readResourceVersion, indexUsed, err := c.listItems(ctx, listRV, preparedKey, pred, recursive)
+	success := "true"
+	fallback := "false"
 	if err != nil {
+		if consistentRead {
+			if storage.IsTooLargeResourceVersion(err) {
+				fallback = "true"
+				err = c.storage.GetList(ctx, key, opts, listObj)
+			}
+			if err != nil {
+				success = "false"
+			}
+			metrics.ConsistentReadTotal.WithLabelValues(c.resourcePrefix, success, fallback).Add(1)
+		}
 		return err
+	}
+	if consistentRead {
+		metrics.ConsistentReadTotal.WithLabelValues(c.resourcePrefix, success, fallback).Add(1)
 	}
 	span.AddEvent("Listed items from cache", attribute.Int("count", len(objs)))
 	// store pointer of eligible objects,
@@ -883,13 +923,21 @@ func (c *Cacher) GetList(ctx context.Context, key string, opts storage.ListOptio
 	//   the elements in ListObject are Struct type, making slice will bring excessive memory consumption.
 	//   so we try to delay this action as much as possible
 	var selectedObjects []runtime.Object
-	for _, obj := range objs {
+	var lastSelectedObjectKey string
+	var hasMoreListItems bool
+	limit := computeListLimit(opts)
+	for i, obj := range objs {
 		elem, ok := obj.(*storeElement)
 		if !ok {
 			return fmt.Errorf("non *storeElement returned from storage: %v", obj)
 		}
-		if filter(elem.Key, elem.Labels, elem.Fields) {
+		if pred.MatchesObjectAttributes(elem.Labels, elem.Fields) {
 			selectedObjects = append(selectedObjects, elem.Object)
+			lastSelectedObjectKey = elem.Key
+		}
+		if limit > 0 && int64(len(selectedObjects)) >= limit {
+			hasMoreListItems = i < len(objs)-1
+			break
 		}
 	}
 	if len(selectedObjects) == 0 {
@@ -905,7 +953,12 @@ func (c *Cacher) GetList(ctx context.Context, key string, opts storage.ListOptio
 	}
 	span.AddEvent("Filtered items", attribute.Int("count", listVal.Len()))
 	if c.versioner != nil {
-		if err := c.versioner.UpdateList(listObj, readResourceVersion, "", nil); err != nil {
+		continueValue, remainingItemCount, err := storage.PrepareContinueToken(lastSelectedObjectKey, key, int64(readResourceVersion), int64(len(objs)), hasMoreListItems, opts)
+		if err != nil {
+			return err
+		}
+
+		if err = c.versioner.UpdateList(listObj, readResourceVersion, continueValue, remainingItemCount); err != nil {
 			return err
 		}
 	}
@@ -934,6 +987,14 @@ func (c *Cacher) GuaranteedUpdate(
 // Count implements storage.Interface.
 func (c *Cacher) Count(pathPrefix string) (int64, error) {
 	return c.storage.Count(pathPrefix)
+}
+
+// ReadinessCheck implements storage.Interface.
+func (c *Cacher) ReadinessCheck() error {
+	if !c.ready.check() {
+		return storage.ErrStorageNotReady
+	}
+	return nil
 }
 
 // baseObjectThreadUnsafe omits locking for cachingObject.
@@ -1069,6 +1130,9 @@ func (c *Cacher) dispatchEvent(event *watchCacheEvent) {
 	// Since add() can block, we explicitly add when cacher is unlocked.
 	// Dispatching event in nonblocking way first, which make faster watchers
 	// not be blocked by slower ones.
+	//
+	// Note: if we ever decide to cache the serialization of bookmark events,
+	// we will also need to modify the watchEncoder encoder
 	if event.Type == watch.Bookmark {
 		for _, watcher := range c.watchersBuffer {
 			watcher.nonblockingAdd(event)
@@ -1293,7 +1357,7 @@ func forgetWatcher(c *Cacher, w *cacheWatcher, index int, scope namespacedName, 
 	}
 }
 
-func filterWithAttrsFunction(key string, p storage.SelectionPredicate) filterWithAttrsFunc {
+func filterWithAttrsAndPrefixFunction(key string, p storage.SelectionPredicate) filterWithAttrsFunc {
 	filterFunc := func(objKey string, label labels.Set, field fields.Set) bool {
 		if !hasPathPrefix(objKey, key) {
 			return false
@@ -1387,6 +1451,26 @@ func (c *Cacher) waitUntilWatchCacheFreshAndForceAllEvents(ctx context.Context, 
 // Wait blocks until the cacher is Ready or Stopped, it returns an error if Stopped.
 func (c *Cacher) Wait(ctx context.Context) error {
 	return c.ready.wait(ctx)
+}
+
+// setInitialEventsEndBookmarkIfRequested sets initialEventsEndBookmark field in watchCacheInterval for watchlist request
+func (c *Cacher) setInitialEventsEndBookmarkIfRequested(cacheInterval *watchCacheInterval, opts storage.ListOptions, currentResourceVersion uint64) {
+	if opts.SendInitialEvents != nil && *opts.SendInitialEvents && opts.Predicate.AllowWatchBookmarks {
+		// We don't need to set the InitialEventsAnnotation for this bookmark event,
+		// because this will be automatically set during event conversion in cacheWatcher.convertToWatchEvent method
+		initialEventsEndBookmark := &watchCacheEvent{
+			Type:            watch.Bookmark,
+			Object:          c.newFunc(),
+			ResourceVersion: currentResourceVersion,
+		}
+
+		if err := c.versioner.UpdateObject(initialEventsEndBookmark.Object, initialEventsEndBookmark.ResourceVersion); err != nil {
+			klog.Errorf("failure to set resourceVersion to %d on initialEventsEndBookmark event %+v for watchlist request and wait for bookmark trigger to send", initialEventsEndBookmark.ResourceVersion, initialEventsEndBookmark.Object)
+			initialEventsEndBookmark = nil
+		}
+
+		cacheInterval.initialEventsEndBookmark = initialEventsEndBookmark
+	}
 }
 
 // errWatcher implements watch.Interface to return a single error

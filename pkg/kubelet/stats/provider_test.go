@@ -347,6 +347,23 @@ func getTestFsInfo(seed int) cadvisorapiv2.FsInfo {
 	}
 }
 
+func getTestFsInfoWithDifferentMount(seed int, device string) cadvisorapiv2.FsInfo {
+	var (
+		inodes     = uint64(seed + offsetFsInodes)
+		inodesFree = uint64(seed + offsetFsInodesFree)
+	)
+	return cadvisorapiv2.FsInfo{
+		Timestamp:  time.Now(),
+		Device:     device,
+		Mountpoint: "test-mount-point",
+		Capacity:   uint64(seed + offsetFsCapacity),
+		Available:  uint64(seed + offsetFsAvailable),
+		Usage:      uint64(seed + offsetFsUsage),
+		Inodes:     &inodes,
+		InodesFree: &inodesFree,
+	}
+}
+
 func getPodVolumeStats(seed int, volumeName string) statsapi.VolumeStats {
 	availableBytes := uint64(seed + offsetFsAvailable)
 	capacityBytes := uint64(seed + offsetFsCapacity)
@@ -427,7 +444,7 @@ func checkNetworkStats(t *testing.T, label string, seed int, stats *statsapi.Net
 	assert.EqualValues(t, seed+offsetNetTxBytes, *stats.TxBytes, label+".Net.TxBytes")
 	assert.EqualValues(t, seed+offsetNetTxErrors, *stats.TxErrors, label+".Net.TxErrors")
 
-	assert.EqualValues(t, 2, len(stats.Interfaces), "network interfaces should contain 2 elements")
+	assert.Len(t, stats.Interfaces, 2, "network interfaces should contain 2 elements")
 
 	assert.EqualValues(t, "eth0", stats.Interfaces[0].Name, "default interface name is not eth0")
 	assert.EqualValues(t, seed+offsetNetRxBytes, *stats.Interfaces[0].RxBytes, label+".Net.TxErrors")

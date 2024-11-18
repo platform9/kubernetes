@@ -98,7 +98,7 @@ func TestUserNsManagerAllocate(t *testing.T) {
 	allocated, length, err := m.allocateOne("one")
 	assert.NoError(t, err)
 	assert.Equal(t, userNsLength, int(length), "m.isSet(%d).length=%v", allocated, length)
-	assert.Equal(t, true, m.isSet(allocated), "m.isSet(%d)", allocated)
+	assert.True(t, m.isSet(allocated), "m.isSet(%d)", allocated)
 
 	allocated2, length2, err := m.allocateOne("two")
 	assert.NoError(t, err)
@@ -114,28 +114,28 @@ func TestUserNsManagerAllocate(t *testing.T) {
 
 	m.Release("one")
 	m.Release("two")
-	assert.Equal(t, false, m.isSet(allocated), "m.isSet(%d)", allocated)
-	assert.Equal(t, false, m.isSet(allocated2), "m.nsSet(%d)", allocated2)
+	assert.False(t, m.isSet(allocated), "m.isSet(%d)", allocated)
+	assert.False(t, m.isSet(allocated2), "m.nsSet(%d)", allocated2)
 
 	var allocs []uint32
 	for i := 0; i < 1000; i++ {
 		allocated, length, err = m.allocateOne(types.UID(fmt.Sprintf("%d", i)))
 		assert.Equal(t, userNsLength, int(length), "length is not the expected. iter: %v", i)
 		assert.NoError(t, err)
-		assert.True(t, allocated >= minimumMappingUID)
+		assert.GreaterOrEqual(t, allocated, uint32(minimumMappingUID))
 		// The last ID of the userns range (allocated+userNsLength) should be within bounds.
-		assert.True(t, allocated <= minimumMappingUID+mappingLen-userNsLength)
+		assert.LessOrEqual(t, allocated, uint32(minimumMappingUID+mappingLen-userNsLength))
 		allocs = append(allocs, allocated)
 	}
 	for i, v := range allocs {
-		assert.Equal(t, true, m.isSet(v), "m.isSet(%d) should be true", v)
+		assert.True(t, m.isSet(v), "m.isSet(%d) should be true", v)
 		m.Release(types.UID(fmt.Sprintf("%d", i)))
-		assert.Equal(t, false, m.isSet(v), "m.isSet(%d) should be false", v)
+		assert.False(t, m.isSet(v), "m.isSet(%d) should be false", v)
 
 		err = m.record(types.UID(fmt.Sprintf("%d", i)), v, userNsLength)
 		assert.NoError(t, err)
 		m.Release(types.UID(fmt.Sprintf("%d", i)))
-		assert.Equal(t, false, m.isSet(v), "m.isSet(%d) should be false", v)
+		assert.False(t, m.isSet(v), "m.isSet(%d) should be false", v)
 	}
 }
 

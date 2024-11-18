@@ -58,9 +58,9 @@ func (pl *SchedulingGates) PreEnqueue(ctx context.Context, p *v1.Pod) *framework
 
 // EventsToRegister returns the possible events that may make a Pod
 // failed by this plugin schedulable.
-func (pl *SchedulingGates) EventsToRegister() []framework.ClusterEventWithHint {
+func (pl *SchedulingGates) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
 	if !pl.enableSchedulingQueueHint {
-		return nil
+		return nil, nil
 	}
 	// When the QueueingHint feature is enabled,
 	// the scheduling queue uses Pod/Update Queueing Hint
@@ -68,8 +68,8 @@ func (pl *SchedulingGates) EventsToRegister() []framework.ClusterEventWithHint {
 	// https://github.com/kubernetes/kubernetes/pull/122234
 	return []framework.ClusterEventWithHint{
 		// Pods can be more schedulable once it's gates are removed
-		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.Update}, QueueingHintFn: pl.isSchedulableAfterPodChange},
-	}
+		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.UpdatePodSchedulingGatesEliminated}, QueueingHintFn: pl.isSchedulableAfterUpdatePodSchedulingGatesEliminated},
+	}, nil
 }
 
 // New initializes a new plugin and returns it.
@@ -79,7 +79,7 @@ func New(_ context.Context, _ runtime.Object, _ framework.Handle, fts feature.Fe
 	}, nil
 }
 
-func (pl *SchedulingGates) isSchedulableAfterPodChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (framework.QueueingHint, error) {
+func (pl *SchedulingGates) isSchedulableAfterUpdatePodSchedulingGatesEliminated(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (framework.QueueingHint, error) {
 	_, modifiedPod, err := util.As[*v1.Pod](oldObj, newObj)
 	if err != nil {
 		return framework.Queue, err
@@ -90,8 +90,5 @@ func (pl *SchedulingGates) isSchedulableAfterPodChange(logger klog.Logger, pod *
 		return framework.QueueSkip, nil
 	}
 
-	if len(modifiedPod.Spec.SchedulingGates) == 0 {
-		return framework.Queue, nil
-	}
-	return framework.QueueSkip, nil
+	return framework.Queue, nil
 }

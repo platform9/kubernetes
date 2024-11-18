@@ -21,14 +21,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/dynamic-resource-allocation/structured"
 	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/resource"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func testClaim(name, namespace string, spec resource.ResourceClaimSpec) *resource.ResourceClaim {
@@ -37,89 +41,98 @@ func testClaim(name, namespace string, spec resource.ResourceClaimSpec) *resourc
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: spec,
+		Spec: *spec.DeepCopy(),
 	}
 }
 
-func TestValidateClaim(t *testing.T) {
-	validMode := resource.AllocationModeImmediate
-	invalidMode := resource.AllocationMode("invalid")
-	goodName := "foo"
-	badName := "!@#$%^"
-	goodNS := "ns"
-	goodClaimSpec := resource.ResourceClaimSpec{
-		ResourceClassName: goodName,
-		AllocationMode:    validMode,
+const (
+	goodName = "foo"
+	badName  = "!@#$%^"
+	goodNS   = "ns"
+)
+
+var (
+	validClaimSpec = resource.ResourceClaimSpec{
+		Devices: resource.DeviceClaim{
+			Requests: []resource.DeviceRequest{{
+				Name:            goodName,
+				DeviceClassName: goodName,
+				AllocationMode:  resource.DeviceAllocationModeExactCount,
+				Count:           1,
+			}},
+		},
 	}
+	validClaim = testClaim(goodName, goodNS, validClaimSpec)
+)
+
+func TestValidateClaim(t *testing.T) {
 	now := metav1.Now()
 	badValue := "spaces not allowed"
-	badAPIGroup := "example.com/v1"
-	goodAPIGroup := "example.com"
 
 	scenarios := map[string]struct {
 		claim        *resource.ResourceClaim
 		wantFailures field.ErrorList
 	}{
 		"good-claim": {
-			claim: testClaim(goodName, goodNS, goodClaimSpec),
+			claim: testClaim(goodName, goodNS, validClaimSpec),
 		},
 		"missing-name": {
 			wantFailures: field.ErrorList{field.Required(field.NewPath("metadata", "name"), "name or generateName is required")},
-			claim:        testClaim("", goodNS, goodClaimSpec),
+			claim:        testClaim("", goodNS, validClaimSpec),
 		},
 		"bad-name": {
 			wantFailures: field.ErrorList{field.Invalid(field.NewPath("metadata", "name"), badName, "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
-			claim:        testClaim(badName, goodNS, goodClaimSpec),
+			claim:        testClaim(badName, goodNS, validClaimSpec),
 		},
 		"missing-namespace": {
 			wantFailures: field.ErrorList{field.Required(field.NewPath("metadata", "namespace"), "")},
-			claim:        testClaim(goodName, "", goodClaimSpec),
+			claim:        testClaim(goodName, "", validClaimSpec),
 		},
 		"generate-name": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.GenerateName = "pvc-"
 				return claim
 			}(),
 		},
 		"uid": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.UID = "ac051fac-2ead-46d9-b8b4-4e0fbeb7455d"
 				return claim
 			}(),
 		},
 		"resource-version": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.ResourceVersion = "1"
 				return claim
 			}(),
 		},
 		"generation": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.Generation = 100
 				return claim
 			}(),
 		},
 		"creation-timestamp": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.CreationTimestamp = now
 				return claim
 			}(),
 		},
 		"deletion-grace-period-seconds": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.DeletionGracePeriodSeconds = pointer.Int64(10)
 				return claim
 			}(),
 		},
 		"owner-references": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.OwnerReferences = []metav1.OwnerReference{
 					{
 						APIVersion: "v1",
@@ -133,7 +146,7 @@ func TestValidateClaim(t *testing.T) {
 		},
 		"finalizers": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.Finalizers = []string{
 					"example.com/foo",
 				}
@@ -142,7 +155,7 @@ func TestValidateClaim(t *testing.T) {
 		},
 		"managed-fields": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.ManagedFields = []metav1.ManagedFieldsEntry{
 					{
 						FieldsType: "FieldsV1",
@@ -156,7 +169,7 @@ func TestValidateClaim(t *testing.T) {
 		},
 		"good-labels": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.Labels = map[string]string{
 					"apps.kubernetes.io/name": "test",
 				}
@@ -166,7 +179,7 @@ func TestValidateClaim(t *testing.T) {
 		"bad-labels": {
 			wantFailures: field.ErrorList{field.Invalid(field.NewPath("metadata", "labels"), badValue, "a valid label must be an empty string or consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyValue',  or 'my_value',  or '12345', regex used for validation is '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')")},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.Labels = map[string]string{
 					"hello-world": badValue,
 				}
@@ -175,7 +188,7 @@ func TestValidateClaim(t *testing.T) {
 		},
 		"good-annotations": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.Annotations = map[string]string{
 					"foo": "bar",
 				}
@@ -185,7 +198,7 @@ func TestValidateClaim(t *testing.T) {
 		"bad-annotations": {
 			wantFailures: field.ErrorList{field.Invalid(field.NewPath("metadata", "annotations"), badName, "name part must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')")},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
+				claim := testClaim(goodName, goodNS, validClaimSpec)
 				claim.Annotations = map[string]string{
 					badName: "hello world",
 				}
@@ -193,70 +206,332 @@ func TestValidateClaim(t *testing.T) {
 			}(),
 		},
 		"bad-classname": {
-			wantFailures: field.ErrorList{field.Invalid(field.NewPath("spec", "resourceClassName"), badName, "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
+			wantFailures: field.ErrorList{field.Invalid(field.NewPath("spec", "devices", "requests").Index(0).Child("deviceClassName"), badName, "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.ResourceClassName = badName
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Requests[0].DeviceClassName = badName
 				return claim
 			}(),
 		},
-		"bad-mode": {
-			wantFailures: field.ErrorList{field.NotSupported(field.NewPath("spec", "allocationMode"), invalidMode, supportedAllocationModes.List())},
+		"missing-classname": {
+			wantFailures: field.ErrorList{field.Required(field.NewPath("spec", "devices", "requests").Index(0).Child("deviceClassName"), "")},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.AllocationMode = invalidMode
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Requests[0].DeviceClassName = ""
 				return claim
 			}(),
 		},
-		"good-parameters": {
+		"invalid-request": {
+			wantFailures: field.ErrorList{
+				field.TooMany(field.NewPath("spec", "devices", "requests"), resource.DeviceRequestsMaxSize+1, resource.DeviceRequestsMaxSize),
+				field.Invalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("requests").Index(1), badName, "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"),
+				field.Invalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("requests").Index(1), badName, "must be the name of a request in the claim"),
+				field.TypeInvalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("matchAttribute"), "missing-domain", "a valid C identifier must start with alphabetic character or '_', followed by a string of alphanumeric characters or '_' (e.g. 'my_name',  or 'MY_NAME',  or 'MyName', regex used for validation is '[A-Za-z_][A-Za-z0-9_]*')"),
+				field.Invalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("matchAttribute"), resource.FullyQualifiedName("missing-domain"), "must include a domain"),
+				field.Required(field.NewPath("spec", "devices", "constraints").Index(1).Child("matchAttribute"), "name required"),
+				field.Required(field.NewPath("spec", "devices", "constraints").Index(2).Child("matchAttribute"), ""),
+				field.TooMany(field.NewPath("spec", "devices", "constraints"), resource.DeviceConstraintsMaxSize+1, resource.DeviceConstraintsMaxSize),
+				field.Invalid(field.NewPath("spec", "devices", "config").Index(0).Child("requests").Index(1), badName, "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"),
+				field.Invalid(field.NewPath("spec", "devices", "config").Index(0).Child("requests").Index(1), badName, "must be the name of a request in the claim"),
+				field.TooMany(field.NewPath("spec", "devices", "config"), resource.DeviceConfigMaxSize+1, resource.DeviceConfigMaxSize),
+			},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.ParametersRef = &resource.ResourceClaimParametersReference{
-					Kind: "foo",
-					Name: "bar",
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Constraints = []resource.DeviceConstraint{
+					{
+						Requests:       []string{claim.Spec.Devices.Requests[0].Name, badName},
+						MatchAttribute: ptr.To(resource.FullyQualifiedName("missing-domain")),
+					},
+					{
+						MatchAttribute: ptr.To(resource.FullyQualifiedName("")),
+					},
+					{
+						MatchAttribute: nil,
+					},
+				}
+				for i := len(claim.Spec.Devices.Constraints); i < resource.DeviceConstraintsMaxSize+1; i++ {
+					claim.Spec.Devices.Constraints = append(claim.Spec.Devices.Constraints, resource.DeviceConstraint{MatchAttribute: ptr.To(resource.FullyQualifiedName("foo/bar"))})
+				}
+				claim.Spec.Devices.Config = []resource.DeviceClaimConfiguration{{
+					Requests: []string{claim.Spec.Devices.Requests[0].Name, badName},
+					DeviceConfiguration: resource.DeviceConfiguration{
+						Opaque: &resource.OpaqueDeviceConfiguration{
+							Driver: "dra.example.com",
+							Parameters: runtime.RawExtension{
+								Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+							},
+						},
+					},
+				}}
+				for i := len(claim.Spec.Devices.Config); i < resource.DeviceConfigMaxSize+1; i++ {
+					claim.Spec.Devices.Config = append(claim.Spec.Devices.Config, resource.DeviceClaimConfiguration{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+								},
+							},
+						},
+					})
+				}
+				for i := len(claim.Spec.Devices.Requests); i < resource.DeviceRequestsMaxSize+1; i++ {
+					req := claim.Spec.Devices.Requests[0].DeepCopy()
+					req.Name += fmt.Sprintf("%d", i)
+					claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
 				}
 				return claim
 			}(),
 		},
-		"good-parameters-apigroup": {
+		"valid-request": {
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.ParametersRef = &resource.ResourceClaimParametersReference{
-					APIGroup: goodAPIGroup,
-					Kind:     "foo",
-					Name:     "bar",
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				for i := len(claim.Spec.Devices.Constraints); i < resource.DeviceConstraintsMaxSize; i++ {
+					claim.Spec.Devices.Constraints = append(claim.Spec.Devices.Constraints, resource.DeviceConstraint{MatchAttribute: ptr.To(resource.FullyQualifiedName("foo/bar"))})
+				}
+				for i := len(claim.Spec.Devices.Config); i < resource.DeviceConfigMaxSize; i++ {
+					claim.Spec.Devices.Config = append(claim.Spec.Devices.Config, resource.DeviceClaimConfiguration{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+								},
+							},
+						},
+					})
+				}
+				for i := len(claim.Spec.Devices.Requests); i < resource.DeviceRequestsMaxSize; i++ {
+					req := claim.Spec.Devices.Requests[0].DeepCopy()
+					req.Name += fmt.Sprintf("%d", i)
+					claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
 				}
 				return claim
 			}(),
 		},
-		"bad-parameters-apigroup": {
-			wantFailures: field.ErrorList{field.Invalid(field.NewPath("spec", "parametersRef", "apiGroup"), badAPIGroup, "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
+		"invalid-spec": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("requests").Index(1), badName, "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"),
+				field.Invalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("requests").Index(1), badName, "must be the name of a request in the claim"),
+				field.TypeInvalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("matchAttribute"), "missing-domain", "a valid C identifier must start with alphabetic character or '_', followed by a string of alphanumeric characters or '_' (e.g. 'my_name',  or 'MY_NAME',  or 'MyName', regex used for validation is '[A-Za-z_][A-Za-z0-9_]*')"),
+				field.Invalid(field.NewPath("spec", "devices", "constraints").Index(0).Child("matchAttribute"), resource.FullyQualifiedName("missing-domain"), "must include a domain"),
+				field.Required(field.NewPath("spec", "devices", "constraints").Index(1).Child("matchAttribute"), "name required"),
+				field.Required(field.NewPath("spec", "devices", "constraints").Index(2).Child("matchAttribute"), ""),
+				field.Invalid(field.NewPath("spec", "devices", "config").Index(0).Child("requests").Index(1), badName, "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"),
+				field.Invalid(field.NewPath("spec", "devices", "config").Index(0).Child("requests").Index(1), badName, "must be the name of a request in the claim"),
+			},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.ParametersRef = &resource.ResourceClaimParametersReference{
-					APIGroup: badAPIGroup,
-					Kind:     "foo",
-					Name:     "bar",
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Constraints = []resource.DeviceConstraint{
+					{
+						Requests:       []string{claim.Spec.Devices.Requests[0].Name, badName},
+						MatchAttribute: ptr.To(resource.FullyQualifiedName("missing-domain")),
+					},
+					{
+						MatchAttribute: ptr.To(resource.FullyQualifiedName("")),
+					},
+					{
+						MatchAttribute: nil,
+					},
+				}
+				claim.Spec.Devices.Config = []resource.DeviceClaimConfiguration{{
+					Requests: []string{claim.Spec.Devices.Requests[0].Name, badName},
+					DeviceConfiguration: resource.DeviceConfiguration{
+						Opaque: &resource.OpaqueDeviceConfiguration{
+							Driver: "dra.example.com",
+							Parameters: runtime.RawExtension{
+								Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+							},
+						},
+					},
+				}}
+				return claim
+			}(),
+		},
+		"allocation-mode": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "devices", "requests").Index(2).Child("count"), int64(-1), "must be greater than zero"),
+				field.NotSupported(field.NewPath("spec", "devices", "requests").Index(3).Child("allocationMode"), resource.DeviceAllocationMode("other"), []resource.DeviceAllocationMode{resource.DeviceAllocationModeAll, resource.DeviceAllocationModeExactCount}),
+				field.Invalid(field.NewPath("spec", "devices", "requests").Index(4).Child("count"), int64(2), "must not be specified when allocationMode is 'All'"),
+				field.Duplicate(field.NewPath("spec", "devices", "requests").Index(5).Child("name"), "foo"),
+			},
+			claim: func() *resource.ResourceClaim {
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+
+				goodReq := &claim.Spec.Devices.Requests[0]
+				goodReq.Name = "foo"
+				goodReq.AllocationMode = resource.DeviceAllocationModeExactCount
+				goodReq.Count = 1
+
+				req := goodReq.DeepCopy()
+				req.Name += "2"
+				req.AllocationMode = resource.DeviceAllocationModeAll
+				req.Count = 0
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
+
+				req = goodReq.DeepCopy()
+				req.Name += "3"
+				req.AllocationMode = resource.DeviceAllocationModeExactCount
+				req.Count = -1
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
+
+				req = goodReq.DeepCopy()
+				req.Name += "4"
+				req.AllocationMode = resource.DeviceAllocationMode("other")
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
+
+				req = goodReq.DeepCopy()
+				req.Name += "5"
+				req.AllocationMode = resource.DeviceAllocationModeAll
+				req.Count = 2
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
+
+				req = goodReq.DeepCopy()
+				// Same name -> duplicate.
+				goodReq.Name = "foo"
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, *req)
+
+				return claim
+			}(),
+		},
+		"configuration": {
+			wantFailures: field.ErrorList{
+				field.Required(field.NewPath("spec", "devices", "config").Index(0).Child("opaque", "parameters"), ""),
+				field.Invalid(field.NewPath("spec", "devices", "config").Index(1).Child("opaque", "parameters"), "<value omitted>", "error parsing data as JSON: unexpected end of JSON input"),
+				field.Invalid(field.NewPath("spec", "devices", "config").Index(2).Child("opaque", "parameters"), "<value omitted>", "parameters must be a valid JSON object"),
+				field.Required(field.NewPath("spec", "devices", "config").Index(3).Child("opaque", "parameters"), ""),
+				field.TooLong(field.NewPath("spec", "devices", "config").Index(5).Child("opaque", "parameters"), "" /* unused */, resource.OpaqueParametersMaxLength),
+			},
+			claim: func() *resource.ResourceClaim {
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Config = []resource.DeviceClaimConfiguration{
+					{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(``),
+								},
+							},
+						},
+					},
+					{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{`),
+								},
+							},
+						},
+					},
+					{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`"hello-world"`),
+								},
+							},
+						},
+					},
+					{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`null`),
+								},
+							},
+						},
+					},
+					{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2) + `"}`),
+								},
+							},
+						},
+					},
+					{
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2+1 /* too large by one */) + `"}`),
+								},
+							},
+						},
+					},
 				}
 				return claim
 			}(),
 		},
-		"missing-parameters-kind": {
-			wantFailures: field.ErrorList{field.Required(field.NewPath("spec", "parametersRef", "kind"), "")},
+		"CEL-compile-errors": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "devices", "requests").Index(1).Child("selectors").Index(1).Child("cel", "expression"), `device.attributes[true].someBoolean`, "compilation failed: ERROR: <input>:1:18: found no matching overload for '_[_]' applied to '(map(string, map(string, any)), bool)'\n | device.attributes[true].someBoolean\n | .................^"),
+			},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.ParametersRef = &resource.ResourceClaimParametersReference{
-					Name: "bar",
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, claim.Spec.Devices.Requests[0])
+				claim.Spec.Devices.Requests[1].Name += "-2"
+				claim.Spec.Devices.Requests[1].Selectors = []resource.DeviceSelector{
+					{
+						// Good selector.
+						CEL: &resource.CELDeviceSelector{
+							Expression: `device.driver == "dra.example.com"`,
+						},
+					},
+					{
+						// Bad selector.
+						CEL: &resource.CELDeviceSelector{
+							Expression: `device.attributes[true].someBoolean`,
+						},
+					},
 				}
 				return claim
 			}(),
 		},
-		"missing-parameters-name": {
-			wantFailures: field.ErrorList{field.Required(field.NewPath("spec", "parametersRef", "name"), "")},
+		"CEL-length": {
+			wantFailures: field.ErrorList{
+				field.TooLong(field.NewPath("spec", "devices", "requests").Index(1).Child("selectors").Index(1).Child("cel", "expression"), "" /*unused*/, resource.CELSelectorExpressionMaxLength),
+			},
 			claim: func() *resource.ResourceClaim {
-				claim := testClaim(goodName, goodNS, goodClaimSpec)
-				claim.Spec.ParametersRef = &resource.ResourceClaimParametersReference{
-					Kind: "foo",
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Requests = append(claim.Spec.Devices.Requests, claim.Spec.Devices.Requests[0])
+				claim.Spec.Devices.Requests[1].Name += "-2"
+				expression := `device.driver == ""`
+				claim.Spec.Devices.Requests[1].Selectors = []resource.DeviceSelector{
+					{
+						// Good selector.
+						CEL: &resource.CELDeviceSelector{
+							Expression: strings.ReplaceAll(expression, `""`, `"`+strings.Repeat("x", resource.CELSelectorExpressionMaxLength-len(expression))+`"`),
+						},
+					},
+					{
+						// Too long by one selector.
+						CEL: &resource.CELDeviceSelector{
+							Expression: strings.ReplaceAll(expression, `""`, `"`+strings.Repeat("x", resource.CELSelectorExpressionMaxLength-len(expression)+1)+`"`),
+						},
+					},
+				}
+				return claim
+			}(),
+		},
+		"CEL-cost": {
+			wantFailures: field.ErrorList{
+				field.Forbidden(field.NewPath("spec", "devices", "requests").Index(0).Child("selectors").Index(0).Child("cel", "expression"), "too complex, exceeds cost limit"),
+			},
+			claim: func() *resource.ResourceClaim {
+				claim := testClaim(goodName, goodNS, validClaimSpec)
+				claim.Spec.Devices.Requests[0].Selectors = []resource.DeviceSelector{
+					{
+						CEL: &resource.CELDeviceSelector{
+							Expression: `device.attributes["dra.example.com"].map(s, s.lowerAscii()).map(s, s.size()).sum() == 0`,
+						},
+					},
 				}
 				return claim
 			}(),
@@ -265,24 +540,13 @@ func TestValidateClaim(t *testing.T) {
 
 	for name, scenario := range scenarios {
 		t.Run(name, func(t *testing.T) {
-			errs := ValidateClaim(scenario.claim)
-			assert.Equal(t, scenario.wantFailures, errs)
+			errs := ValidateResourceClaim(scenario.claim)
+			assertFailures(t, scenario.wantFailures, errs)
 		})
 	}
 }
 
 func TestValidateClaimUpdate(t *testing.T) {
-	name := "valid"
-	parameters := &resource.ResourceClaimParametersReference{
-		Kind: "foo",
-		Name: "bar",
-	}
-	validClaim := testClaim("foo", "ns", resource.ResourceClaimSpec{
-		ResourceClassName: name,
-		AllocationMode:    resource.AllocationModeImmediate,
-		ParametersRef:     parameters,
-	})
-
 	scenarios := map[string]struct {
 		oldClaim     *resource.ResourceClaim
 		update       func(claim *resource.ResourceClaim) *resource.ResourceClaim
@@ -292,39 +556,33 @@ func TestValidateClaimUpdate(t *testing.T) {
 			oldClaim: validClaim,
 			update:   func(claim *resource.ResourceClaim) *resource.ResourceClaim { return claim },
 		},
-		"invalid-update-class": {
+		"invalid-update": {
 			wantFailures: field.ErrorList{field.Invalid(field.NewPath("spec"), func() resource.ResourceClaimSpec {
 				spec := validClaim.Spec.DeepCopy()
-				spec.ResourceClassName += "2"
+				spec.Devices.Requests[0].DeviceClassName += "2"
 				return *spec
 			}(), "field is immutable")},
 			oldClaim: validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Spec.ResourceClassName += "2"
+				claim.Spec.Devices.Requests[0].DeviceClassName += "2"
 				return claim
 			},
 		},
-		"invalid-update-remove-parameters": {
-			wantFailures: field.ErrorList{field.Invalid(field.NewPath("spec"), func() resource.ResourceClaimSpec {
-				spec := validClaim.Spec.DeepCopy()
-				spec.ParametersRef = nil
-				return *spec
-			}(), "field is immutable")},
-			oldClaim: validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Spec.ParametersRef = nil
+		"too-large-config-valid-if-stored": {
+			oldClaim: func() *resource.ResourceClaim {
+				claim := validClaim.DeepCopy()
+				claim.Spec.Devices.Config = []resource.DeviceClaimConfiguration{{
+					DeviceConfiguration: resource.DeviceConfiguration{
+						Opaque: &resource.OpaqueDeviceConfiguration{
+							Driver:     goodName,
+							Parameters: runtime.RawExtension{Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2+1 /* too large by one */) + `"}`)},
+						},
+					},
+				}}
 				return claim
-			},
-		},
-		"invalid-update-mode": {
-			wantFailures: field.ErrorList{field.Invalid(field.NewPath("spec"), func() resource.ResourceClaimSpec {
-				spec := validClaim.Spec.DeepCopy()
-				spec.AllocationMode = resource.AllocationModeWaitForFirstConsumer
-				return *spec
-			}(), "field is immutable")},
-			oldClaim: validClaim,
+			}(),
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Spec.AllocationMode = resource.AllocationModeWaitForFirstConsumer
+				// No changes -> remains valid.
 				return claim
 			},
 		},
@@ -333,217 +591,110 @@ func TestValidateClaimUpdate(t *testing.T) {
 	for name, scenario := range scenarios {
 		t.Run(name, func(t *testing.T) {
 			scenario.oldClaim.ResourceVersion = "1"
-			errs := ValidateClaimUpdate(scenario.update(scenario.oldClaim.DeepCopy()), scenario.oldClaim)
-			assert.Equal(t, scenario.wantFailures, errs)
+			errs := ValidateResourceClaimUpdate(scenario.update(scenario.oldClaim.DeepCopy()), scenario.oldClaim)
+			assertFailures(t, scenario.wantFailures, errs)
 		})
 	}
 }
 
 func TestValidateClaimStatusUpdate(t *testing.T) {
-	invalidName := "!@#$%^"
-	validClaim := testClaim("foo", "ns", resource.ResourceClaimSpec{
-		ResourceClassName: "valid",
-		AllocationMode:    resource.AllocationModeImmediate,
-	})
-
 	validAllocatedClaim := validClaim.DeepCopy()
 	validAllocatedClaim.Status = resource.ResourceClaimStatus{
-		DriverName: "valid",
 		Allocation: &resource.AllocationResult{
-			ResourceHandles: func() []resource.ResourceHandle {
-				var handles []resource.ResourceHandle
-				for i := 0; i < resource.AllocationResultResourceHandlesMaxSize; i++ {
-					handle := resource.ResourceHandle{
-						DriverName: "valid",
-						Data:       strings.Repeat(" ", resource.ResourceHandleDataMaxSize),
-					}
-					handles = append(handles, handle)
-				}
-				return handles
-			}(),
-			Shareable: true,
+			Devices: resource.DeviceAllocationResult{
+				Results: []resource.DeviceRequestAllocationResult{{
+					Request:     goodName,
+					Driver:      goodName,
+					Pool:        goodName,
+					Device:      goodName,
+					AdminAccess: ptr.To(false), // Required for new allocations.
+				}},
+			},
 		},
 	}
+	validAllocatedClaimOld := validAllocatedClaim.DeepCopy()
+	validAllocatedClaimOld.Status.Allocation.Devices.Results[0].AdminAccess = nil // Not required in 1.31.
 
 	scenarios := map[string]struct {
-		oldClaim     *resource.ResourceClaim
-		update       func(claim *resource.ResourceClaim) *resource.ResourceClaim
-		wantFailures field.ErrorList
+		adminAccess             bool
+		deviceStatusFeatureGate bool
+		oldClaim                *resource.ResourceClaim
+		update                  func(claim *resource.ResourceClaim) *resource.ResourceClaim
+		wantFailures            field.ErrorList
 	}{
 		"valid-no-op-update": {
 			oldClaim: validClaim,
 			update:   func(claim *resource.ResourceClaim) *resource.ResourceClaim { return claim },
 		},
-		"add-driver": {
+		"valid-add-allocation-empty": {
 			oldClaim: validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
-				return claim
-			},
-		},
-		"invalid-add-allocation": {
-			wantFailures: field.ErrorList{field.Required(field.NewPath("status", "driverName"), "must be specified when `allocation` is set")},
-			oldClaim:     validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				// DriverName must also get set here!
 				claim.Status.Allocation = &resource.AllocationResult{}
 				return claim
 			},
 		},
-		"valid-add-allocation": {
+		"valid-add-allocation-non-empty": {
 			oldClaim: validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
 				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName: "valid",
-							Data:       strings.Repeat(" ", resource.ResourceHandleDataMaxSize),
-						},
+					Devices: resource.DeviceAllocationResult{
+						Results: []resource.DeviceRequestAllocationResult{{
+							Request:     goodName,
+							Driver:      goodName,
+							Pool:        goodName,
+							Device:      goodName,
+							AdminAccess: ptr.To(false),
+						}},
 					},
 				}
 				return claim
 			},
 		},
-		"valid-add-empty-allocation-structured": {
-			oldClaim: validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
-				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName:     "valid",
-							StructuredData: &resource.StructuredResourceHandle{},
-						},
-					},
-				}
-				return claim
-			},
-		},
-		"valid-add-allocation-structured": {
-			oldClaim: validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
-				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName: "valid",
-							StructuredData: &resource.StructuredResourceHandle{
-								NodeName: "worker",
-							},
-						},
-					},
-				}
-				return claim
-			},
-		},
-		"invalid-add-allocation-structured": {
+		"invalid-add-allocation-bad-request": {
 			wantFailures: field.ErrorList{
-				field.Invalid(field.NewPath("status", "allocation", "resourceHandles").Index(0).Child("structuredData", "nodeName"), "&^!", "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')"),
-				field.Required(field.NewPath("status", "allocation", "resourceHandles").Index(0).Child("structuredData", "results").Index(1), "exactly one structured model field must be set"),
+				field.Invalid(field.NewPath("status", "allocation", "devices", "results").Index(0).Child("request"), badName, "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"),
+				field.Invalid(field.NewPath("status", "allocation", "devices", "results").Index(0).Child("request"), badName, "must be the name of a request in the claim"),
 			},
 			oldClaim: validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
 				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName: "valid",
-							StructuredData: &resource.StructuredResourceHandle{
-								NodeName: "&^!",
-								Results: []resource.DriverAllocationResult{
-									{
-										AllocationResultModel: resource.AllocationResultModel{
-											NamedResources: &resource.NamedResourcesAllocationResult{
-												Name: "some-resource-instance",
-											},
-										},
-									},
-									{
-										AllocationResultModel: resource.AllocationResultModel{}, // invalid
-									},
-								},
-							},
-						},
+					Devices: resource.DeviceAllocationResult{
+						Results: []resource.DeviceRequestAllocationResult{{
+							Request:     badName,
+							Driver:      goodName,
+							Pool:        goodName,
+							Device:      goodName,
+							AdminAccess: ptr.To(false),
+						}},
 					},
 				}
 				return claim
 			},
 		},
-		"invalid-duplicated-data": {
-			wantFailures: field.ErrorList{field.Invalid(field.NewPath("status", "allocation", "resourceHandles").Index(0), nil, "data and structuredData are mutually exclusive")},
-			oldClaim:     validClaim,
+		"okay-add-allocation-missing-admin-access": {
+			adminAccess: false,
+			oldClaim:    validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
 				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName: "valid",
-							Data:       "something",
-							StructuredData: &resource.StructuredResourceHandle{
-								NodeName: "worker",
-							},
-						},
-					},
-				}
-				return claim
-			},
-		},
-		"invalid-allocation-resourceHandles": {
-			wantFailures: field.ErrorList{field.TooLongMaxLength(field.NewPath("status", "allocation", "resourceHandles"), resource.AllocationResultResourceHandlesMaxSize+1, resource.AllocationResultResourceHandlesMaxSize)},
-			oldClaim:     validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
-				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: func() []resource.ResourceHandle {
-						var handles []resource.ResourceHandle
-						for i := 0; i < resource.AllocationResultResourceHandlesMaxSize+1; i++ {
-							handles = append(handles, resource.ResourceHandle{DriverName: "valid"})
-						}
-						return handles
-					}(),
-				}
-				return claim
-			},
-		},
-		"invalid-allocation-resource-handle-drivername": {
-			wantFailures: field.ErrorList{field.Invalid(field.NewPath("status", "allocation", "resourceHandles[0]", "driverName"), invalidName, "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
-			oldClaim:     validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
-				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName: invalidName,
-						},
-					},
-				}
-				return claim
-			},
-		},
-		"invalid-allocation-resource-handle-data": {
-			wantFailures: field.ErrorList{field.TooLongMaxLength(field.NewPath("status", "allocation", "resourceHandles").Index(0).Child("data"), resource.ResourceHandleDataMaxSize+1, resource.ResourceHandleDataMaxSize)},
-			oldClaim:     validClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
-				claim.Status.Allocation = &resource.AllocationResult{
-					ResourceHandles: []resource.ResourceHandle{
-						{
-							DriverName: "valid",
-							Data:       strings.Repeat(" ", resource.ResourceHandleDataMaxSize+1),
-						},
+					Devices: resource.DeviceAllocationResult{
+						Results: []resource.DeviceRequestAllocationResult{{
+							Request:     goodName,
+							Driver:      goodName,
+							Pool:        goodName,
+							Device:      goodName,
+							AdminAccess: nil, // Intentionally not set.
+						}},
 					},
 				}
 				return claim
 			},
 		},
 		"invalid-node-selector": {
-			wantFailures: field.ErrorList{field.Required(field.NewPath("status", "allocation", "availableOnNodes", "nodeSelectorTerms"), "must have at least one node selector term")},
+			wantFailures: field.ErrorList{field.Required(field.NewPath("status", "allocation", "nodeSelector", "nodeSelectorTerms"), "must have at least one node selector term")},
 			oldClaim:     validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
 				claim.Status.Allocation = &resource.AllocationResult{
-					AvailableOnNodes: &core.NodeSelector{
+					NodeSelector: &core.NodeSelector{
 						// Must not be empty.
 					},
 				}
@@ -552,6 +703,20 @@ func TestValidateClaimStatusUpdate(t *testing.T) {
 		},
 		"add-reservation": {
 			oldClaim: validAllocatedClaim,
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				for i := 0; i < resource.ResourceClaimReservedForMaxSize; i++ {
+					claim.Status.ReservedFor = append(claim.Status.ReservedFor,
+						resource.ResourceClaimConsumerReference{
+							Resource: "pods",
+							Name:     fmt.Sprintf("foo-%d", i),
+							UID:      types.UID(fmt.Sprintf("%d", i)),
+						})
+				}
+				return claim
+			},
+		},
+		"add-reservation-old-claim": {
+			oldClaim: validAllocatedClaimOld,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
 				for i := 0; i < resource.ResourceClaimReservedForMaxSize; i++ {
 					claim.Status.ReservedFor = append(claim.Status.ReservedFor,
@@ -580,7 +745,7 @@ func TestValidateClaimStatusUpdate(t *testing.T) {
 			},
 		},
 		"invalid-reserved-for-too-large": {
-			wantFailures: field.ErrorList{field.TooLongMaxLength(field.NewPath("status", "reservedFor"), resource.ResourceClaimReservedForMaxSize+1, resource.ResourceClaimReservedForMaxSize)},
+			wantFailures: field.ErrorList{field.TooMany(field.NewPath("status", "reservedFor"), resource.ResourceClaimReservedForMaxSize+1, resource.ResourceClaimReservedForMaxSize)},
 			oldClaim:     validAllocatedClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
 				for i := 0; i < resource.ResourceClaimReservedForMaxSize+1; i++ {
@@ -609,30 +774,10 @@ func TestValidateClaimStatusUpdate(t *testing.T) {
 				return claim
 			},
 		},
-		"invalid-reserved-for-not-shared": {
-			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status", "reservedFor"), "may not be reserved more than once")},
-			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.Allocation.Shareable = false
-				return claim
-			}(),
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				for i := 0; i < 2; i++ {
-					claim.Status.ReservedFor = append(claim.Status.ReservedFor,
-						resource.ResourceClaimConsumerReference{
-							Resource: "pods",
-							Name:     fmt.Sprintf("foo-%d", i),
-							UID:      types.UID(fmt.Sprintf("%d", i)),
-						})
-				}
-				return claim
-			},
-		},
 		"invalid-reserved-for-no-allocation": {
 			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status", "reservedFor"), "may not be specified when `allocated` is not set")},
 			oldClaim:     validClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DriverName = "valid"
 				claim.Status.ReservedFor = []resource.ResourceClaimConsumerReference{
 					{
 						Resource: "pods",
@@ -701,126 +846,457 @@ func TestValidateClaimStatusUpdate(t *testing.T) {
 				return claim
 			},
 		},
-		"invalid-reserved-deallocation-requested": {
-			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status", "reservedFor"), "new entries may not be added while `deallocationRequested` or `deletionTimestamp` are set")},
-			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.DeallocationRequested = true
-				return claim
-			}(),
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.ReservedFor = []resource.ResourceClaimConsumerReference{
-					{
-						Resource: "pods",
-						Name:     "foo",
-						UID:      "1",
-					},
-				}
-				return claim
-			},
-		},
-		"add-deallocation-requested": {
-			oldClaim: validAllocatedClaim,
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DeallocationRequested = true
-				return claim
-			},
-		},
-		"remove-allocation": {
-			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.DeallocationRequested = true
-				return claim
-			}(),
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DeallocationRequested = false
-				claim.Status.Allocation = nil
-				return claim
-			},
-		},
-		"invalid-deallocation-requested-removal": {
-			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status", "deallocationRequested"), "may not be cleared when `allocation` is set")},
-			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.DeallocationRequested = true
-				return claim
-			}(),
-			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DeallocationRequested = false
-				return claim
-			},
-		},
 		"invalid-allocation-modification": {
 			wantFailures: field.ErrorList{field.Invalid(field.NewPath("status.allocation"), func() *resource.AllocationResult {
 				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.Allocation.ResourceHandles = []resource.ResourceHandle{
-					{
-						DriverName: "valid",
-						Data:       strings.Repeat(" ", resource.ResourceHandleDataMaxSize/2),
-					},
-				}
+				claim.Status.Allocation.Devices.Results[0].Driver += "-2"
 				return claim.Status.Allocation
 			}(), "field is immutable")},
-			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.DeallocationRequested = false
-				return claim
-			}(),
+			oldClaim: validAllocatedClaim,
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.Allocation.ResourceHandles = []resource.ResourceHandle{
-					{
-						DriverName: "valid",
-						Data:       strings.Repeat(" ", resource.ResourceHandleDataMaxSize/2),
+				claim.Status.Allocation.Devices.Results[0].Driver += "-2"
+				return claim
+			},
+		},
+		"invalid-request-name": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("status", "allocation", "devices", "config").Index(0).Child("requests").Index(1), badName, "a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')"),
+				field.Invalid(field.NewPath("status", "allocation", "devices", "config").Index(0).Child("requests").Index(1), badName, "must be the name of a request in the claim"),
+			},
+			oldClaim: validClaim,
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim = claim.DeepCopy()
+				claim.Status.Allocation = validAllocatedClaim.Status.Allocation.DeepCopy()
+				claim.Status.Allocation.Devices.Config = []resource.DeviceAllocationConfiguration{{
+					Source:   resource.AllocationConfigSourceClaim,
+					Requests: []string{claim.Spec.Devices.Requests[0].Name, badName},
+					DeviceConfiguration: resource.DeviceConfiguration{
+						Opaque: &resource.OpaqueDeviceConfiguration{
+							Driver: "dra.example.com",
+							Parameters: runtime.RawExtension{
+								Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+							},
+						},
 					},
+				}}
+				return claim
+			},
+		},
+		"configuration": {
+			wantFailures: field.ErrorList{
+				field.Required(field.NewPath("status", "allocation", "devices", "config").Index(1).Child("source"), ""),
+				field.NotSupported(field.NewPath("status", "allocation", "devices", "config").Index(2).Child("source"), resource.AllocationConfigSource("no-such-source"), []resource.AllocationConfigSource{resource.AllocationConfigSourceClaim, resource.AllocationConfigSourceClass}),
+				field.Required(field.NewPath("status", "allocation", "devices", "config").Index(3).Child("opaque"), ""),
+				field.Required(field.NewPath("status", "allocation", "devices", "config").Index(4).Child("opaque", "driver"), ""),
+				field.Invalid(field.NewPath("status", "allocation", "devices", "config").Index(4).Child("opaque", "driver"), "", "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')"),
+				field.Required(field.NewPath("status", "allocation", "devices", "config").Index(4).Child("opaque", "parameters"), ""),
+				field.TooLong(field.NewPath("status", "allocation", "devices", "config").Index(6).Child("opaque", "parameters"), "" /* unused */, resource.OpaqueParametersMaxLength),
+			},
+			oldClaim: validClaim,
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim = claim.DeepCopy()
+				claim.Status.Allocation = validAllocatedClaim.Status.Allocation.DeepCopy()
+				claim.Status.Allocation.Devices.Config = []resource.DeviceAllocationConfiguration{
+					{
+						Source: resource.AllocationConfigSourceClaim,
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+								},
+							},
+						},
+					},
+					{
+						Source: "", /* Empty! */
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+								},
+							},
+						},
+					},
+					{
+						Source: resource.AllocationConfigSource("no-such-source"),
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver: "dra.example.com",
+								Parameters: runtime.RawExtension{
+									Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+								},
+							},
+						},
+					},
+					{
+						Source:              resource.AllocationConfigSourceClaim,
+						DeviceConfiguration: resource.DeviceConfiguration{ /* Empty! */ },
+					},
+					{
+						Source: resource.AllocationConfigSourceClaim,
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{ /* Empty! */ },
+						},
+					},
+					{
+						Source: resource.AllocationConfigSourceClaim,
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver:     goodName,
+								Parameters: runtime.RawExtension{Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2) + `"}`)},
+							},
+						},
+					},
+					{
+						Source: resource.AllocationConfigSourceClaim,
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver:     goodName,
+								Parameters: runtime.RawExtension{Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2+1 /* too large by one */) + `"}`)},
+							},
+						},
+					},
+					// Other invalid resource.DeviceConfiguration are covered elsewhere. */
 				}
 				return claim
 			},
 		},
-		"invalid-deallocation-requested-in-use": {
-			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status", "deallocationRequested"), "deallocation cannot be requested while `reservedFor` is set")},
+		"valid-configuration-update": {
 			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.ReservedFor = []resource.ResourceClaimConsumerReference{
+				claim := validClaim.DeepCopy()
+				claim.Status.Allocation = validAllocatedClaim.Status.Allocation.DeepCopy()
+				claim.Status.Allocation.Devices.Config = []resource.DeviceAllocationConfiguration{
 					{
-						Resource: "pods",
-						Name:     "foo",
-						UID:      "1",
+						Source: resource.AllocationConfigSourceClaim,
+						DeviceConfiguration: resource.DeviceConfiguration{
+							Opaque: &resource.OpaqueDeviceConfiguration{
+								Driver:     goodName,
+								Parameters: runtime.RawExtension{Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2+1 /* too large by one */) + `"}`)},
+							},
+						},
 					},
 				}
 				return claim
 			}(),
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DeallocationRequested = true
+				// No change -> remains valid.
 				return claim
 			},
 		},
-		"invalid-deallocation-not-allocated": {
-			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status"), "`allocation` must be set when `deallocationRequested` is set")},
-			oldClaim:     validClaim,
+		"valid-network-device-status": {
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.DeallocationRequested = true
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						Conditions: []metav1.Condition{
+							{Type: "test-0", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-1", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-2", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-3", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-4", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-5", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-6", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-7", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+						},
+						Data: runtime.RawExtension{
+							Raw: []byte(`{"kind": "foo", "apiVersion": "dra.example.com/v1"}`),
+						},
+						NetworkData: &resource.NetworkDeviceData{
+							InterfaceName:   strings.Repeat("x", 256),
+							HardwareAddress: strings.Repeat("x", 128),
+							IPs: []string{
+								"10.9.8.0/24",
+								"2001:db8::/64",
+								"10.9.8.1/24",
+								"2001:db8::1/64",
+								"10.9.8.2/24", "10.9.8.3/24", "10.9.8.4/24", "10.9.8.5/24", "10.9.8.6/24", "10.9.8.7/24",
+								"10.9.8.8/24", "10.9.8.9/24", "10.9.8.10/24", "10.9.8.11/24", "10.9.8.12/24", "10.9.8.13/24",
+							},
+						},
+					},
+				}
 				return claim
 			},
+			deviceStatusFeatureGate: true,
 		},
-		"invalid-allocation-removal-not-reset": {
-			wantFailures: field.ErrorList{field.Forbidden(field.NewPath("status"), "`allocation` must be set when `deallocationRequested` is set")},
-			oldClaim: func() *resource.ResourceClaim {
-				claim := validAllocatedClaim.DeepCopy()
-				claim.Status.DeallocationRequested = true
-				return claim
-			}(),
+		"invalid-device-status-duplicate": {
+			wantFailures: field.ErrorList{
+				field.Duplicate(field.NewPath("status", "devices").Index(0).Child("networkData", "ips").Index(1), "2001:db8::1/64"),
+				field.Duplicate(field.NewPath("status", "devices").Index(1).Child("deviceID"), structured.MakeDeviceID(goodName, goodName, goodName)),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
 			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
-				claim.Status.Allocation = nil
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						NetworkData: &resource.NetworkDeviceData{
+							IPs: []string{
+								"2001:db8::1/64",
+								"2001:0db8::1/64",
+							},
+						},
+					},
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+					},
+				}
 				return claim
 			},
+			deviceStatusFeatureGate: true,
+		},
+		"invalid-network-device-status": {
+			wantFailures: field.ErrorList{
+				field.TooLong(field.NewPath("status", "devices").Index(0).Child("networkData", "interfaceName"), "", interfaceNameMaxLength),
+				field.TooLong(field.NewPath("status", "devices").Index(0).Child("networkData", "hardwareAddress"), "", hardwareAddressMaxLength),
+				field.Invalid(field.NewPath("status", "devices").Index(0).Child("networkData", "ips").Index(0), "300.9.8.0/24", "must be a valid CIDR value, (e.g. 10.9.8.0/24 or 2001:db8::/64)"),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						NetworkData: &resource.NetworkDeviceData{
+							InterfaceName:   strings.Repeat("x", interfaceNameMaxLength+1),
+							HardwareAddress: strings.Repeat("x", hardwareAddressMaxLength+1),
+							IPs: []string{
+								"300.9.8.0/24",
+							},
+						},
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: true,
+		},
+		"invalid-data-device-status": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("status", "devices").Index(0).Child("data"), "<value omitted>", "error parsing data as JSON: invalid character 'o' in literal false (expecting 'a')"),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						Data: runtime.RawExtension{
+							Raw: []byte(`foo`),
+						},
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: true,
+		},
+		"invalid-data-device-status-limits": {
+			wantFailures: field.ErrorList{
+				field.TooMany(field.NewPath("status", "devices").Index(0).Child("conditions"), maxConditions+1, maxConditions),
+				field.TooLong(field.NewPath("status", "devices").Index(0).Child("data"), "" /* unused */, resource.OpaqueParametersMaxLength),
+				field.TooMany(field.NewPath("status", "devices").Index(0).Child("networkData", "ips"), maxIPs+1, maxIPs),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						Data:   runtime.RawExtension{Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2+1 /* too large by one */) + `"}`)},
+						Conditions: []metav1.Condition{
+							{Type: "test-0", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-1", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-2", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-3", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-4", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-5", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-6", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-7", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-8", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+						},
+						NetworkData: &resource.NetworkDeviceData{
+							IPs: []string{
+								"10.9.8.0/24", "10.9.8.1/24", "10.9.8.2/24", "10.9.8.3/24", "10.9.8.4/24", "10.9.8.5/24", "10.9.8.6/24", "10.9.8.7/24", "10.9.8.8/24",
+								"10.9.8.9/24", "10.9.8.10/24", "10.9.8.11/24", "10.9.8.12/24", "10.9.8.13/24", "10.9.8.14/24", "10.9.8.15/24", "10.9.8.16/24",
+							},
+						},
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: true,
+		},
+		"invalid-device-status-no-device": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("status", "devices").Index(0), structured.MakeDeviceID("b", "a", "r"), "must be an allocated device in the claim"),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: "b",
+						Pool:   "a",
+						Device: "r",
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: true,
+		},
+		"invalid-device-status-duplicate-disabled-feature-gate": {
+			wantFailures: field.ErrorList{
+				field.Duplicate(field.NewPath("status", "devices").Index(0).Child("networkData", "ips").Index(1), "2001:db8::1/64"),
+				field.Duplicate(field.NewPath("status", "devices").Index(1).Child("deviceID"), structured.MakeDeviceID(goodName, goodName, goodName)),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						NetworkData: &resource.NetworkDeviceData{
+							IPs: []string{
+								"2001:db8::1/64",
+								"2001:0db8::1/64",
+							},
+						},
+					},
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: false,
+		},
+		"invalid-network-device-status-disabled-feature-gate": {
+			wantFailures: field.ErrorList{
+				field.TooLong(field.NewPath("status", "devices").Index(0).Child("networkData", "interfaceName"), "", interfaceNameMaxLength),
+				field.TooLong(field.NewPath("status", "devices").Index(0).Child("networkData", "hardwareAddress"), "", hardwareAddressMaxLength),
+				field.Invalid(field.NewPath("status", "devices").Index(0).Child("networkData", "ips").Index(0), "300.9.8.0/24", "must be a valid CIDR value, (e.g. 10.9.8.0/24 or 2001:db8::/64)"),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						NetworkData: &resource.NetworkDeviceData{
+							InterfaceName:   strings.Repeat("x", interfaceNameMaxLength+1),
+							HardwareAddress: strings.Repeat("x", hardwareAddressMaxLength+1),
+							IPs: []string{
+								"300.9.8.0/24",
+							},
+						},
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: false,
+		},
+		"invalid-data-device-status-disabled-feature-gate": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("status", "devices").Index(0).Child("data"), "<value omitted>", "error parsing data as JSON: invalid character 'o' in literal false (expecting 'a')"),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						Data: runtime.RawExtension{
+							Raw: []byte(`foo`),
+						},
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: false,
+		},
+		"invalid-data-device-status-limits-feature-gate": {
+			wantFailures: field.ErrorList{
+				field.TooMany(field.NewPath("status", "devices").Index(0).Child("conditions"), maxConditions+1, maxConditions),
+				field.TooLong(field.NewPath("status", "devices").Index(0).Child("data"), "" /* unused */, resource.OpaqueParametersMaxLength),
+				field.TooMany(field.NewPath("status", "devices").Index(0).Child("networkData", "ips"), maxIPs+1, maxIPs),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: goodName,
+						Pool:   goodName,
+						Device: goodName,
+						Data:   runtime.RawExtension{Raw: []byte(`{"str": "` + strings.Repeat("x", resource.OpaqueParametersMaxLength-9-2+1 /* too large by one */) + `"}`)},
+						Conditions: []metav1.Condition{
+							{Type: "test-0", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-1", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-2", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-3", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-4", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-5", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-6", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-7", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+							{Type: "test-8", Status: metav1.ConditionTrue, Reason: "test_reason", LastTransitionTime: metav1.Now(), ObservedGeneration: 0},
+						},
+						NetworkData: &resource.NetworkDeviceData{
+							IPs: []string{
+								"10.9.8.0/24", "10.9.8.1/24", "10.9.8.2/24", "10.9.8.3/24", "10.9.8.4/24", "10.9.8.5/24", "10.9.8.6/24", "10.9.8.7/24", "10.9.8.8/24",
+								"10.9.8.9/24", "10.9.8.10/24", "10.9.8.11/24", "10.9.8.12/24", "10.9.8.13/24", "10.9.8.14/24", "10.9.8.15/24", "10.9.8.16/24",
+							},
+						},
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: false,
+		},
+		"invalid-device-status-no-device-disabled-feature-gate": {
+			wantFailures: field.ErrorList{
+				field.Invalid(field.NewPath("status", "devices").Index(0), structured.MakeDeviceID("b", "a", "r"), "must be an allocated device in the claim"),
+			},
+			oldClaim: func() *resource.ResourceClaim { return validAllocatedClaim }(),
+			update: func(claim *resource.ResourceClaim) *resource.ResourceClaim {
+				claim.Status.Devices = []resource.AllocatedDeviceStatus{
+					{
+						Driver: "b",
+						Pool:   "a",
+						Device: "r",
+					},
+				}
+				return claim
+			},
+			deviceStatusFeatureGate: false,
 		},
 	}
 
 	for name, scenario := range scenarios {
 		t.Run(name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAAdminAccess, scenario.adminAccess)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAResourceClaimDeviceStatus, scenario.deviceStatusFeatureGate)
+
 			scenario.oldClaim.ResourceVersion = "1"
-			errs := ValidateClaimStatusUpdate(scenario.update(scenario.oldClaim.DeepCopy()), scenario.oldClaim)
-			assert.Equal(t, scenario.wantFailures, errs)
+			errs := ValidateResourceClaimStatusUpdate(scenario.update(scenario.oldClaim.DeepCopy()), scenario.oldClaim)
+
+			if name == "invalid-data-device-status-limits-feature-gate" {
+				fmt.Println(errs)
+				fmt.Println(scenario.wantFailures)
+			}
+			assertFailures(t, scenario.wantFailures, errs)
 		})
 	}
 }

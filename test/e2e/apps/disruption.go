@@ -209,8 +209,8 @@ var _ = SIGDescribe("DisruptionController", func() {
 					return false, err
 				}
 				return isPDBErroring(pdb), nil
-			}, 1*time.Minute, 1*time.Second).ShouldNot(gomega.BeTrue(), "pod shouldn't error for "+
-				"unmanaged pod")
+			}, 1*time.Minute, 1*time.Second).ShouldNot(gomega.BeTrueBecause("pod shouldn't error for " +
+				"unmanaged pod"))
 		})
 
 	evictionCases := []struct {
@@ -474,7 +474,7 @@ var _ = SIGDescribe("DisruptionController", func() {
 			rs.Labels["name"] = rsName
 			initialDelaySeconds := framework.PodStartTimeout.Seconds() + 30
 			if tc.podsShouldBecomeReadyFirst {
-				initialDelaySeconds = 0
+				initialDelaySeconds = 20
 			}
 			rs.Spec.Template.Spec.Containers[0].ReadinessProbe = &v1.Probe{
 				ProbeHandler: v1.ProbeHandler{
@@ -511,6 +511,9 @@ var _ = SIGDescribe("DisruptionController", func() {
 						Namespace: ns,
 					},
 				}
+				// New pods can be created between the evictions by a replica set controller.
+				// This can affect the PDB, and pods could potentially be evicted that shouldn't be.
+				// To prevent this, there should always be a sufficient pod readiness delay (see initialDelaySeconds).
 				err = cs.CoreV1().Pods(ns).EvictV1(ctx, e)
 				if err == nil {
 					evictedPods.Insert(pod.Name)

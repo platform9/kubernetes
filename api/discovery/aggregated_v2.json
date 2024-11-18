@@ -383,25 +383,6 @@
             }
           ],
           "version": "v1beta1"
-        },
-        {
-          "freshness": "Current",
-          "resources": [
-            {
-              "resource": "selfsubjectreviews",
-              "responseKind": {
-                "group": "",
-                "kind": "SelfSubjectReview",
-                "version": ""
-              },
-              "scope": "Cluster",
-              "singularResource": "selfsubjectreview",
-              "verbs": [
-                "create"
-              ]
-            }
-          ],
-          "version": "v1alpha1"
         }
       ]
     },
@@ -912,7 +893,7 @@
               ]
             }
           ],
-          "version": "v1alpha1"
+          "version": "v1beta1"
         }
       ]
     },
@@ -1219,6 +1200,35 @@
               ]
             }
           ],
+          "version": "v1beta1"
+        },
+        {
+          "freshness": "Current",
+          "resources": [
+            {
+              "resource": "volumeattributesclasses",
+              "responseKind": {
+                "group": "",
+                "kind": "VolumeAttributesClass",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "shortNames": [
+                "vac"
+              ],
+              "singularResource": "volumeattributesclass",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            }
+          ],
           "version": "v1alpha1"
         }
       ]
@@ -1416,29 +1426,14 @@
               "categories": [
                 "api-extensions"
               ],
-              "resource": "validatingadmissionpolicies",
+              "resource": "mutatingadmissionpolicies",
               "responseKind": {
                 "group": "",
-                "kind": "ValidatingAdmissionPolicy",
+                "kind": "MutatingAdmissionPolicy",
                 "version": ""
               },
               "scope": "Cluster",
-              "singularResource": "validatingadmissionpolicy",
-              "subresources": [
-                {
-                  "responseKind": {
-                    "group": "",
-                    "kind": "ValidatingAdmissionPolicy",
-                    "version": ""
-                  },
-                  "subresource": "status",
-                  "verbs": [
-                    "get",
-                    "patch",
-                    "update"
-                  ]
-                }
-              ],
+              "singularResource": "mutatingadmissionpolicy",
               "verbs": [
                 "create",
                 "delete",
@@ -1454,14 +1449,14 @@
               "categories": [
                 "api-extensions"
               ],
-              "resource": "validatingadmissionpolicybindings",
+              "resource": "mutatingadmissionpolicybindings",
               "responseKind": {
                 "group": "",
-                "kind": "ValidatingAdmissionPolicyBinding",
+                "kind": "MutatingAdmissionPolicyBinding",
                 "version": ""
               },
               "scope": "Cluster",
-              "singularResource": "validatingadmissionpolicybinding",
+              "singularResource": "mutatingadmissionpolicybinding",
               "verbs": [
                 "create",
                 "delete",
@@ -1602,6 +1597,32 @@
             }
           ],
           "version": "v1"
+        },
+        {
+          "freshness": "Current",
+          "resources": [
+            {
+              "resource": "leasecandidates",
+              "responseKind": {
+                "group": "",
+                "kind": "LeaseCandidate",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "leasecandidate",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            }
+          ],
+          "version": "v1alpha2"
         }
       ]
     },
@@ -1670,6 +1691,216 @@
             }
           ],
           "version": "v1"
+        }
+      ]
+    },
+    {
+      "metadata": {
+        "creationTimestamp": null,
+        "name": "resource.k8s.io"
+      },
+      "versions": [
+        {
+          "freshness": "Current",
+          "resources": [
+            {
+              "resource": "deviceclasses",
+              "responseKind": {
+                "group": "",
+                "kind": "DeviceClass",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "deviceclass",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceclaims",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceClaim",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "resourceclaim",
+              "subresources": [
+                {
+                  "responseKind": {
+                    "group": "",
+                    "kind": "ResourceClaim",
+                    "version": ""
+                  },
+                  "subresource": "status",
+                  "verbs": [
+                    "get",
+                    "patch",
+                    "update"
+                  ]
+                }
+              ],
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceclaimtemplates",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceClaimTemplate",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "resourceclaimtemplate",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceslices",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceSlice",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "resourceslice",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            }
+          ],
+          "version": "v1beta1"
+        },
+        {
+          "freshness": "Current",
+          "resources": [
+            {
+              "resource": "deviceclasses",
+              "responseKind": {
+                "group": "",
+                "kind": "DeviceClass",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "deviceclass",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceclaims",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceClaim",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "resourceclaim",
+              "subresources": [
+                {
+                  "responseKind": {
+                    "group": "",
+                    "kind": "ResourceClaim",
+                    "version": ""
+                  },
+                  "subresource": "status",
+                  "verbs": [
+                    "get",
+                    "patch",
+                    "update"
+                  ]
+                }
+              ],
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceclaimtemplates",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceClaimTemplate",
+                "version": ""
+              },
+              "scope": "Namespaced",
+              "singularResource": "resourceclaimtemplate",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            },
+            {
+              "resource": "resourceslices",
+              "responseKind": {
+                "group": "",
+                "kind": "ResourceSlice",
+                "version": ""
+              },
+              "scope": "Cluster",
+              "singularResource": "resourceslice",
+              "verbs": [
+                "create",
+                "delete",
+                "deletecollection",
+                "get",
+                "list",
+                "patch",
+                "update",
+                "watch"
+              ]
+            }
+          ],
+          "version": "v1alpha3"
         }
       ]
     },
@@ -1754,82 +1985,6 @@
             }
           ],
           "version": "v1"
-        },
-        {
-          "freshness": "Current",
-          "resources": [
-            {
-              "resource": "flowschemas",
-              "responseKind": {
-                "group": "",
-                "kind": "FlowSchema",
-                "version": ""
-              },
-              "scope": "Cluster",
-              "singularResource": "flowschema",
-              "subresources": [
-                {
-                  "responseKind": {
-                    "group": "",
-                    "kind": "FlowSchema",
-                    "version": ""
-                  },
-                  "subresource": "status",
-                  "verbs": [
-                    "get",
-                    "patch",
-                    "update"
-                  ]
-                }
-              ],
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "prioritylevelconfigurations",
-              "responseKind": {
-                "group": "",
-                "kind": "PriorityLevelConfiguration",
-                "version": ""
-              },
-              "scope": "Cluster",
-              "singularResource": "prioritylevelconfiguration",
-              "subresources": [
-                {
-                  "responseKind": {
-                    "group": "",
-                    "kind": "PriorityLevelConfiguration",
-                    "version": ""
-                  },
-                  "subresource": "status",
-                  "verbs": [
-                    "get",
-                    "patch",
-                    "update"
-                  ]
-                }
-              ],
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            }
-          ],
-          "version": "v1beta3"
         }
       ]
     },
@@ -1879,190 +2034,6 @@
             }
           ],
           "version": "v1alpha1"
-        }
-      ]
-    },
-    {
-      "metadata": {
-        "creationTimestamp": null,
-        "name": "resource.k8s.io"
-      },
-      "versions": [
-        {
-          "freshness": "Current",
-          "resources": [
-            {
-              "resource": "podschedulingcontexts",
-              "responseKind": {
-                "group": "",
-                "kind": "PodSchedulingContext",
-                "version": ""
-              },
-              "scope": "Namespaced",
-              "singularResource": "podschedulingcontext",
-              "subresources": [
-                {
-                  "responseKind": {
-                    "group": "",
-                    "kind": "PodSchedulingContext",
-                    "version": ""
-                  },
-                  "subresource": "status",
-                  "verbs": [
-                    "get",
-                    "patch",
-                    "update"
-                  ]
-                }
-              ],
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "resourceclaimparameters",
-              "responseKind": {
-                "group": "",
-                "kind": "ResourceClaimParameters",
-                "version": ""
-              },
-              "scope": "Namespaced",
-              "singularResource": "resourceclaimparameters",
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "resourceclaims",
-              "responseKind": {
-                "group": "",
-                "kind": "ResourceClaim",
-                "version": ""
-              },
-              "scope": "Namespaced",
-              "singularResource": "resourceclaim",
-              "subresources": [
-                {
-                  "responseKind": {
-                    "group": "",
-                    "kind": "ResourceClaim",
-                    "version": ""
-                  },
-                  "subresource": "status",
-                  "verbs": [
-                    "get",
-                    "patch",
-                    "update"
-                  ]
-                }
-              ],
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "resourceclaimtemplates",
-              "responseKind": {
-                "group": "",
-                "kind": "ResourceClaimTemplate",
-                "version": ""
-              },
-              "scope": "Namespaced",
-              "singularResource": "resourceclaimtemplate",
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "resourceclasses",
-              "responseKind": {
-                "group": "",
-                "kind": "ResourceClass",
-                "version": ""
-              },
-              "scope": "Cluster",
-              "singularResource": "resourceclass",
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "resourceclassparameters",
-              "responseKind": {
-                "group": "",
-                "kind": "ResourceClassParameters",
-                "version": ""
-              },
-              "scope": "Namespaced",
-              "singularResource": "resourceclassparameters",
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            },
-            {
-              "resource": "resourceslices",
-              "responseKind": {
-                "group": "",
-                "kind": "ResourceSlice",
-                "version": ""
-              },
-              "scope": "Cluster",
-              "singularResource": "resourceslice",
-              "verbs": [
-                "create",
-                "delete",
-                "deletecollection",
-                "get",
-                "list",
-                "patch",
-                "update",
-                "watch"
-              ]
-            }
-          ],
-          "version": "v1alpha2"
         }
       ]
     },

@@ -50,6 +50,7 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	remote "k8s.io/cri-client/pkg"
 	kubelettypes "k8s.io/kubelet/pkg/types"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
@@ -169,22 +170,10 @@ func calcRestartCountByLogDir(path string) (int, error) {
 	return restartCount, nil
 }
 
-// startContainer starts a container and returns a message indicates why it is failed on error.
-// It starts the container through the following steps:
-// * pull the image
-// * create the container
-// * start the container
-// * run the post start lifecycle hooks (if applicable)
-func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandboxID string, podSandboxConfig *runtimeapi.PodSandboxConfig, spec *startSpec, pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, podIP string, podIPs []string) (string, error) {
-	container := spec.container
-
-	// Step 1: pull the image.
-
+func (m *kubeGenericRuntimeManager) getPodRuntimeHandler(pod *v1.Pod) (podRuntimeHandler string, err error) {
 	// If RuntimeClassInImageCriAPI feature gate is enabled, pass runtimehandler
 	// information for the runtime class specified. If not runtime class is
 	// specified, then pass ""
-	podRuntimeHandler := ""
-	var err error
 	if utilfeature.DefaultFeatureGate.Enabled(features.RuntimeClassInImageCriAPI) {
 		if pod.Spec.RuntimeClassName != nil && *pod.Spec.RuntimeClassName != "" {
 			podRuntimeHandler, err = m.runtimeClassManager.LookupRuntimeHandler(pod.Spec.RuntimeClassName)
@@ -195,7 +184,30 @@ func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandb
 		}
 	}
 
-	imageRef, msg, err := m.imagePuller.EnsureImageExists(ctx, pod, container, pullSecrets, podSandboxConfig, podRuntimeHandler)
+	return podRuntimeHandler, nil
+}
+
+// startContainer starts a container and returns a message indicates why it is failed on error.
+// It starts the container through the following steps:
+// * pull the image
+// * create the container
+// * start the container
+// * run the post start lifecycle hooks (if applicable)
+func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandboxID string, podSandboxConfig *runtimeapi.PodSandboxConfig, spec *startSpec, pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, podIP string, podIPs []string, imageVolumes kubecontainer.ImageVolumes) (string, error) {
+	container := spec.container
+
+	// Step 1: pull the image.
+	podRuntimeHandler, err := m.getPodRuntimeHandler(pod)
+	if err != nil {
+		return "", err
+	}
+
+	ref, err := kubecontainer.GenerateContainerRef(pod, container)
+	if err != nil {
+		klog.ErrorS(err, "Couldn't make a ref to pod", "pod", klog.KObj(pod), "containerName", container.Name)
+	}
+
+	imageRef, msg, err := m.imagePuller.EnsureImageExists(ctx, ref, pod, container.Image, pullSecrets, podSandboxConfig, podRuntimeHandler, container.ImagePullPolicy)
 	if err != nil {
 		s, _ := grpcstatus.FromError(err)
 		m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
@@ -234,7 +246,7 @@ func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandb
 		return s.Message(), ErrCreateContainerConfig
 	}
 
-	containerConfig, cleanupAction, err := m.generateContainerConfig(ctx, container, pod, restartCount, podIP, imageRef, podIPs, target)
+	containerConfig, cleanupAction, err := m.generateContainerConfig(ctx, container, pod, restartCount, podIP, imageRef, podIPs, target, imageVolumes)
 	if cleanupAction != nil {
 		defer cleanupAction()
 	}
@@ -263,7 +275,7 @@ func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandb
 		m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToStartContainer, "Internal PreStartContainer hook failed: %v", s.Message())
 		return s.Message(), ErrPreStartHook
 	}
-	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
+	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.CreatedContainer, "Created container: %v", container.Name)
 
 	// Step 3: start the container.
 	err = m.runtimeService.StartContainer(ctx, containerID)
@@ -272,7 +284,7 @@ func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandb
 		m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToStartContainer, "Error: %v", s.Message())
 		return s.Message(), kubecontainer.ErrRunContainer
 	}
-	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
+	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.StartedContainer, "Started container %v", container.Name)
 
 	// Symlink container logs to the legacy container log location for cluster logging
 	// support.
@@ -317,8 +329,8 @@ func (m *kubeGenericRuntimeManager) startContainer(ctx context.Context, podSandb
 }
 
 // generateContainerConfig generates container config for kubelet runtime v1.
-func (m *kubeGenericRuntimeManager) generateContainerConfig(ctx context.Context, container *v1.Container, pod *v1.Pod, restartCount int, podIP, imageRef string, podIPs []string, nsTarget *kubecontainer.ContainerID) (*runtimeapi.ContainerConfig, func(), error) {
-	opts, cleanupAction, err := m.runtimeHelper.GenerateRunContainerOptions(ctx, pod, container, podIP, podIPs)
+func (m *kubeGenericRuntimeManager) generateContainerConfig(ctx context.Context, container *v1.Container, pod *v1.Pod, restartCount int, podIP, imageRef string, podIPs []string, nsTarget *kubecontainer.ContainerID, imageVolumes kubecontainer.ImageVolumes) (*runtimeapi.ContainerConfig, func(), error) {
+	opts, cleanupAction, err := m.runtimeHelper.GenerateRunContainerOptions(ctx, pod, container, podIP, podIPs, imageVolumes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -436,6 +448,7 @@ func (m *kubeGenericRuntimeManager) makeMounts(opts *kubecontainer.RunContainerO
 			SelinuxRelabel:    selinuxRelabel,
 			Propagation:       v.Propagation,
 			RecursiveReadOnly: v.RecursiveReadOnly,
+			Image:             v.Image,
 		}
 
 		volumeMounts = append(volumeMounts, mount)
@@ -651,6 +664,18 @@ func toKubeContainerStatus(status *runtimeapi.ContainerStatus, runtimeName strin
 		cStatus.ExitCode = int(status.ExitCode)
 		cStatus.FinishedAt = time.Unix(0, status.FinishedAt)
 	}
+
+	for _, mount := range status.Mounts {
+		cStatus.Mounts = append(cStatus.Mounts, kubecontainer.Mount{
+			HostPath:          mount.HostPath,
+			ContainerPath:     mount.ContainerPath,
+			ReadOnly:          mount.Readonly,
+			RecursiveReadOnly: mount.RecursiveReadOnly,
+			SELinuxRelabel:    mount.SelinuxRelabel,
+			Propagation:       mount.Propagation,
+			Image:             mount.Image,
+		})
+	}
 	return cStatus
 }
 
@@ -756,7 +781,7 @@ func (m *kubeGenericRuntimeManager) killContainer(ctx context.Context, pod *v1.P
 	if len(message) == 0 {
 		message = fmt.Sprintf("Stopping container %s", containerSpec.Name)
 	}
-	m.recordContainerEvent(pod, containerSpec, containerID.ID, v1.EventTypeNormal, events.KillingContainer, message)
+	m.recordContainerEvent(pod, containerSpec, containerID.ID, v1.EventTypeNormal, events.KillingContainer, "%v", message)
 
 	if gracePeriodOverride != nil {
 		gracePeriod = *gracePeriodOverride
@@ -808,7 +833,7 @@ func (m *kubeGenericRuntimeManager) killContainersWithSyncResult(ctx context.Con
 	wg.Add(len(runningPod.Containers))
 	var termOrdering *terminationOrdering
 	// we only care about container termination ordering if the sidecars feature is enabled
-	if utilfeature.DefaultFeatureGate.Enabled(features.SidecarContainers) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.SidecarContainers) && types.HasRestartableInitContainer(pod) {
 		var runningContainerNames []string
 		for _, container := range runningPod.Containers {
 			runningContainerNames = append(runningContainerNames, container.Name)
@@ -1046,13 +1071,13 @@ func (m *kubeGenericRuntimeManager) computeInitContainerActions(pod *v1.Pod, pod
 			// If the container is previously initialized but its status is not
 			// found, it means its last status is removed for some reason.
 			// Restart it if it is a restartable init container.
-			if isPreviouslyInitialized && types.IsRestartableInitContainer(container) {
+			if isPreviouslyInitialized && podutil.IsRestartableInitContainer(container) {
 				changes.InitContainersToStart = append(changes.InitContainersToStart, i)
 			}
 			continue
 		}
 
-		if isPreviouslyInitialized && !types.IsRestartableInitContainer(container) {
+		if isPreviouslyInitialized && !podutil.IsRestartableInitContainer(container) {
 			// after initialization, only restartable init containers need to be kept
 			// running
 			continue
@@ -1060,14 +1085,19 @@ func (m *kubeGenericRuntimeManager) computeInitContainerActions(pod *v1.Pod, pod
 
 		switch status.State {
 		case kubecontainer.ContainerStateCreated:
-			// nothing to do but wait for it to start
+			// The main sync loop should have created and started the container
+			// in one step. If the init container is in the 'created' state,
+			// it is likely that the container runtime failed to start it. To
+			// prevent the container from getting stuck in the 'created' state,
+			// restart it.
+			changes.InitContainersToStart = append(changes.InitContainersToStart, i)
 
 		case kubecontainer.ContainerStateRunning:
-			if !types.IsRestartableInitContainer(container) {
+			if !podutil.IsRestartableInitContainer(container) {
 				break
 			}
 
-			if types.IsRestartableInitContainer(container) {
+			if podutil.IsRestartableInitContainer(container) {
 				if container.StartupProbe != nil {
 					startup, found := m.startupManager.Get(status.ID)
 					if !found {
@@ -1098,6 +1128,18 @@ func (m *kubeGenericRuntimeManager) computeInitContainerActions(pod *v1.Pod, pod
 					changes.InitContainersToStart = append(changes.InitContainersToStart, i+1)
 				}
 
+				// Restart running sidecar containers which have had their definition changed.
+				if _, _, changed := containerChanged(container, status); changed {
+					changes.ContainersToKill[status.ID] = containerToKillInfo{
+						name:      container.Name,
+						container: container,
+						message:   fmt.Sprintf("Init container %s definition changed", container.Name),
+						reason:    "",
+					}
+					changes.InitContainersToStart = append(changes.InitContainersToStart, i)
+					break
+				}
+
 				// A restartable init container does not have to take into account its
 				// liveness probe when it determines to start the next init container.
 				if container.LivenessProbe != nil {
@@ -1126,7 +1168,7 @@ func (m *kubeGenericRuntimeManager) computeInitContainerActions(pod *v1.Pod, pod
 		// If the init container failed and the restart policy is Never, the pod is terminal.
 		// Otherwise, restart the init container.
 		case kubecontainer.ContainerStateExited:
-			if types.IsRestartableInitContainer(container) {
+			if podutil.IsRestartableInitContainer(container) {
 				changes.InitContainersToStart = append(changes.InitContainersToStart, i)
 			} else { // init container
 				if isInitContainerFailed(status) {
@@ -1149,7 +1191,7 @@ func (m *kubeGenericRuntimeManager) computeInitContainerActions(pod *v1.Pod, pod
 			}
 
 		default: // kubecontainer.ContainerStatusUnknown or other unknown states
-			if types.IsRestartableInitContainer(container) {
+			if podutil.IsRestartableInitContainer(container) {
 				// If the restartable init container is in unknown state, restart it.
 				changes.ContainersToKill[status.ID] = containerToKillInfo{
 					name:      container.Name,

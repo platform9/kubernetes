@@ -26,13 +26,10 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	v1resource "k8s.io/kubernetes/pkg/api/v1/resource"
-	"k8s.io/kubernetes/pkg/features"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	volumeutils "k8s.io/kubernetes/pkg/volume/util"
@@ -738,7 +735,6 @@ func process(stats statsFunc) cmpFunc {
 
 		p1Process := processUsage(p1Stats.ProcessStats)
 		p2Process := processUsage(p2Stats.ProcessStats)
-		// prioritize evicting the pod which has the larger consumption of process
 		return int(p2Process - p1Process)
 	}
 }
@@ -846,13 +842,11 @@ func makeSignalObservations(summary *statsapi.Summary) (signalObservations, stat
 	// build an evaluation context for current eviction signals
 	result := signalObservations{}
 
-	if memory := summary.Node.Memory; memory != nil && memory.AvailableBytes != nil && memory.WorkingSetBytes != nil {
-		result[evictionapi.SignalMemoryAvailable] = signalObservation{
-			available: resource.NewQuantity(int64(*memory.AvailableBytes), resource.BinarySI),
-			capacity:  resource.NewQuantity(int64(*memory.AvailableBytes+*memory.WorkingSetBytes), resource.BinarySI),
-			time:      memory.Time,
-		}
+	memoryAvailableSignal := makeMemoryAvailableSignalObservation(summary)
+	if memoryAvailableSignal != nil {
+		result[evictionapi.SignalMemoryAvailable] = *memoryAvailableSignal
 	}
+
 	if allocatableContainer, err := getSysContainer(summary.Node.SystemContainers, statsapi.SystemContainerPods); err != nil {
 		klog.ErrorS(err, "Eviction manager: failed to construct signal", "signal", evictionapi.SignalAllocatableMemoryAvailable)
 	} else {
@@ -1208,6 +1202,8 @@ func buildSignalToNodeReclaimFuncs(imageGC ImageGC, containerGC ContainerGC, wit
 		// with an imagefs, imagefs pressure should delete unused images
 		signalToReclaimFunc[evictionapi.SignalImageFsAvailable] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers, imageGC.DeleteUnusedImages}
 		signalToReclaimFunc[evictionapi.SignalImageFsInodesFree] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers, imageGC.DeleteUnusedImages}
+		signalToReclaimFunc[evictionapi.SignalContainerFsAvailable] = signalToReclaimFunc[evictionapi.SignalImageFsAvailable]
+		signalToReclaimFunc[evictionapi.SignalContainerFsInodesFree] = signalToReclaimFunc[evictionapi.SignalImageFsInodesFree]
 		// usage of imagefs and container fs on separate disks
 		// containers gc on containerfs pressure
 		// image gc on imagefs pressure
@@ -1218,6 +1214,8 @@ func buildSignalToNodeReclaimFuncs(imageGC ImageGC, containerGC ContainerGC, wit
 		// with an split fs and imagefs, containerfs pressure should delete unused containers
 		signalToReclaimFunc[evictionapi.SignalNodeFsAvailable] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers}
 		signalToReclaimFunc[evictionapi.SignalNodeFsInodesFree] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers}
+		signalToReclaimFunc[evictionapi.SignalContainerFsAvailable] = signalToReclaimFunc[evictionapi.SignalNodeFsAvailable]
+		signalToReclaimFunc[evictionapi.SignalContainerFsInodesFree] = signalToReclaimFunc[evictionapi.SignalNodeFsInodesFree]
 	} else {
 		// without an imagefs, nodefs pressure should delete logs, and unused images
 		// since imagefs, containerfs and nodefs share a common device, they share common reclaim functions
@@ -1225,6 +1223,8 @@ func buildSignalToNodeReclaimFuncs(imageGC ImageGC, containerGC ContainerGC, wit
 		signalToReclaimFunc[evictionapi.SignalNodeFsInodesFree] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers, imageGC.DeleteUnusedImages}
 		signalToReclaimFunc[evictionapi.SignalImageFsAvailable] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers, imageGC.DeleteUnusedImages}
 		signalToReclaimFunc[evictionapi.SignalImageFsInodesFree] = nodeReclaimFuncs{containerGC.DeleteAllUnusedContainers, imageGC.DeleteUnusedImages}
+		signalToReclaimFunc[evictionapi.SignalContainerFsAvailable] = signalToReclaimFunc[evictionapi.SignalNodeFsAvailable]
+		signalToReclaimFunc[evictionapi.SignalContainerFsInodesFree] = signalToReclaimFunc[evictionapi.SignalNodeFsInodesFree]
 	}
 	return signalToReclaimFunc
 }
@@ -1237,22 +1237,24 @@ func evictionMessage(resourceToReclaim v1.ResourceName, pod *v1.Pod, stats stats
 	if quantity != nil && available != nil {
 		message += fmt.Sprintf(thresholdMetMessageFmt, quantity, available)
 	}
-	containers := []string{}
+	exceededContainers := []string{}
 	containerUsage := []string{}
 	podStats, ok := stats(pod)
 	if !ok {
 		return
 	}
+	// Since the resources field cannot be specified for ephemeral containers,
+	// they will always be blamed for resource overuse when an eviction occurs.
+	// That’s why only regular, init and restartable init containers are considered
+	// for the eviction message.
+	containers := pod.Spec.Containers
+	if len(pod.Spec.InitContainers) != 0 {
+		containers = append(containers, pod.Spec.InitContainers...)
+	}
 	for _, containerStats := range podStats.Containers {
-		for _, container := range pod.Spec.Containers {
+		for _, container := range containers {
 			if container.Name == containerStats.Name {
 				requests := container.Resources.Requests[resourceToReclaim]
-				if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) &&
-					(resourceToReclaim == v1.ResourceMemory || resourceToReclaim == v1.ResourceCPU) {
-					if cs, ok := podutil.GetContainerStatus(pod.Status.ContainerStatuses, container.Name); ok {
-						requests = cs.AllocatedResources[resourceToReclaim]
-					}
-				}
 				var usage *resource.Quantity
 				switch resourceToReclaim {
 				case v1.ResourceEphemeralStorage:
@@ -1266,13 +1268,16 @@ func evictionMessage(resourceToReclaim v1.ResourceName, pod *v1.Pod, stats stats
 				}
 				if usage != nil && usage.Cmp(requests) > 0 {
 					message += fmt.Sprintf(containerMessageFmt, container.Name, usage.String(), requests.String(), resourceToReclaim)
-					containers = append(containers, container.Name)
+					exceededContainers = append(exceededContainers, container.Name)
 					containerUsage = append(containerUsage, usage.String())
 				}
+				// Found the container to compare resource usage with,
+				// so it's safe to break out of the containers loop here.
+				break
 			}
 		}
 	}
-	annotations[OffendingContainersKey] = strings.Join(containers, ",")
+	annotations[OffendingContainersKey] = strings.Join(exceededContainers, ",")
 	annotations[OffendingContainersUsageKey] = strings.Join(containerUsage, ",")
 	annotations[StarvedResourceKey] = string(resourceToReclaim)
 	return

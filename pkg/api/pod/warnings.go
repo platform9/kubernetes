@@ -19,17 +19,16 @@ package pod
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	nodeapi "k8s.io/kubernetes/pkg/api/node"
 	pvcutil "k8s.io/kubernetes/pkg/api/persistentvolumeclaim"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/core/pods"
-	"k8s.io/kubernetes/pkg/features"
 )
 
 func GetWarningsForPod(ctx context.Context, pod, oldPod *api.Pod) []string {
@@ -170,6 +169,10 @@ func warningsForPodSpecAndMeta(fieldPath *field.Path, podSpec *api.PodSpec, meta
 		}
 	}
 
+	if overlaps := warningsForOverlappingVirtualPaths(podSpec.Volumes); len(overlaps) > 0 {
+		warnings = append(warnings, overlaps...)
+	}
+
 	// duplicate hostAliases (#91670, #58477)
 	if len(podSpec.HostAliases) > 1 {
 		items := sets.New[string]()
@@ -225,14 +228,13 @@ func warningsForPodSpecAndMeta(fieldPath *field.Path, podSpec *api.PodSpec, meta
 		}
 
 		// use of container AppArmor annotation without accompanying field
-		if utilfeature.DefaultFeatureGate.Enabled(features.AppArmorFields) {
-			isPodTemplate := fieldPath != nil // Pod warnings are emitted through applyAppArmorVersionSkew instead.
-			hasAppArmorField := hasPodAppArmorProfile || (c.SecurityContext != nil && c.SecurityContext.AppArmorProfile != nil)
-			if isPodTemplate && !hasAppArmorField {
-				key := api.DeprecatedAppArmorAnnotationKeyPrefix + c.Name
-				if _, exists := meta.Annotations[key]; exists {
-					warnings = append(warnings, fmt.Sprintf(`%s: deprecated since v1.30; use the "appArmorProfile" field instead`, fieldPath.Child("metadata", "annotations").Key(key)))
-				}
+
+		isPodTemplate := fieldPath != nil // Pod warnings are emitted through applyAppArmorVersionSkew instead.
+		hasAppArmorField := hasPodAppArmorProfile || (c.SecurityContext != nil && c.SecurityContext.AppArmorProfile != nil)
+		if isPodTemplate && !hasAppArmorField {
+			key := api.DeprecatedAppArmorAnnotationKeyPrefix + c.Name
+			if _, exists := meta.Annotations[key]; exists {
+				warnings = append(warnings, fmt.Sprintf(`%s: deprecated since v1.30; use the "appArmorProfile" field instead`, fieldPath.Child("metadata", "annotations").Key(key)))
 			}
 		}
 
@@ -356,4 +358,167 @@ func warningsForWeightedPodAffinityTerms(terms []api.WeightedPodAffinityTerm, fi
 		}
 	}
 	return warnings
+}
+
+// warningsForOverlappingVirtualPaths validates that there are no overlapping paths in single ConfigMapVolume, SecretVolume, DownwardAPIVolume and ProjectedVolume.
+// A volume can try to load different keys to the same path which will result in overwriting of the value from the latest registered key
+// Another possible scenario is when one of the path contains the other key path. Example:
+// configMap:
+//
+//		name: myconfig
+//		items:
+//		  - key: key1
+//		    path: path
+//	      - key: key2
+//			path: path/path2
+//
+// In such cases we either get `is directory` or 'file exists' error message.
+func warningsForOverlappingVirtualPaths(volumes []api.Volume) []string {
+	var warnings []string
+
+	mkWarn := func(volName, volDesc, body string) string {
+		return fmt.Sprintf("volume %q (%s): overlapping paths: %s", volName, volDesc, body)
+	}
+
+	for _, v := range volumes {
+		if v.ConfigMap != nil && v.ConfigMap.Items != nil {
+			overlaps := checkVolumeMappingForOverlap(extractPaths(v.ConfigMap.Items, ""))
+			for _, ol := range overlaps {
+				warnings = append(warnings, mkWarn(v.Name, fmt.Sprintf("ConfigMap %q", v.ConfigMap.Name), ol))
+			}
+		}
+
+		if v.Secret != nil && v.Secret.Items != nil {
+			overlaps := checkVolumeMappingForOverlap(extractPaths(v.Secret.Items, ""))
+			for _, ol := range overlaps {
+				warnings = append(warnings, mkWarn(v.Name, fmt.Sprintf("Secret %q", v.Secret.SecretName), ol))
+			}
+		}
+
+		if v.DownwardAPI != nil && v.DownwardAPI.Items != nil {
+			overlaps := checkVolumeMappingForOverlap(extractPathsDownwardAPI(v.DownwardAPI.Items, ""))
+			for _, ol := range overlaps {
+				warnings = append(warnings, mkWarn(v.Name, "DownwardAPI", ol))
+			}
+		}
+
+		if v.Projected != nil {
+			var sourcePaths []pathAndSource
+			var allPaths []pathAndSource
+
+			for _, source := range v.Projected.Sources {
+				if source == (api.VolumeProjection{}) {
+					warnings = append(warnings, fmt.Sprintf("volume %q (Projected) has no sources provided", v.Name))
+					continue
+				}
+
+				switch {
+				case source.ConfigMap != nil && source.ConfigMap.Items != nil:
+					sourcePaths = extractPaths(source.ConfigMap.Items, fmt.Sprintf("ConfigMap %q", source.ConfigMap.Name))
+				case source.Secret != nil && source.Secret.Items != nil:
+					sourcePaths = extractPaths(source.Secret.Items, fmt.Sprintf("Secret %q", source.Secret.Name))
+				case source.DownwardAPI != nil && source.DownwardAPI.Items != nil:
+					sourcePaths = extractPathsDownwardAPI(source.DownwardAPI.Items, "DownwardAPI")
+				case source.ServiceAccountToken != nil:
+					sourcePaths = []pathAndSource{{source.ServiceAccountToken.Path, "ServiceAccountToken"}}
+				case source.ClusterTrustBundle != nil:
+					name := ""
+					if source.ClusterTrustBundle.Name != nil {
+						name = *source.ClusterTrustBundle.Name
+					} else {
+						name = *source.ClusterTrustBundle.SignerName
+					}
+					sourcePaths = []pathAndSource{{source.ClusterTrustBundle.Path, fmt.Sprintf("ClusterTrustBundle %q", name)}}
+				}
+
+				if len(sourcePaths) == 0 {
+					continue
+				}
+
+				for _, ps := range sourcePaths {
+					ps.path = strings.TrimRight(ps.path, string(os.PathSeparator))
+					if collisions := checkForOverlap(allPaths, ps); len(collisions) > 0 {
+						for _, c := range collisions {
+							warnings = append(warnings, mkWarn(v.Name, "Projected", fmt.Sprintf("%s with %s", ps.String(), c.String())))
+						}
+					}
+					allPaths = append(allPaths, ps)
+				}
+			}
+		}
+	}
+	return warnings
+}
+
+// this lets us track a path and where it came from, for better errors
+type pathAndSource struct {
+	path   string
+	source string
+}
+
+func (ps pathAndSource) String() string {
+	if ps.source != "" {
+		return fmt.Sprintf("%q (%s)", ps.path, ps.source)
+	}
+	return fmt.Sprintf("%q", ps.path)
+}
+
+func extractPaths(mapping []api.KeyToPath, source string) []pathAndSource {
+	result := make([]pathAndSource, 0, len(mapping))
+
+	for _, v := range mapping {
+		result = append(result, pathAndSource{v.Path, source})
+	}
+	return result
+}
+
+func extractPathsDownwardAPI(mapping []api.DownwardAPIVolumeFile, source string) []pathAndSource {
+	result := make([]pathAndSource, 0, len(mapping))
+
+	for _, v := range mapping {
+		result = append(result, pathAndSource{v.Path, source})
+	}
+	return result
+}
+
+func checkVolumeMappingForOverlap(paths []pathAndSource) []string {
+	pathSeparator := string(os.PathSeparator)
+	var warnings []string
+	var allPaths []pathAndSource
+
+	for _, ps := range paths {
+		ps.path = strings.TrimRight(ps.path, pathSeparator)
+		if collisions := checkForOverlap(allPaths, ps); len(collisions) > 0 {
+			for _, c := range collisions {
+				warnings = append(warnings, fmt.Sprintf("%s with %s", ps.String(), c.String()))
+			}
+		}
+		allPaths = append(allPaths, ps)
+	}
+
+	return warnings
+}
+
+func checkForOverlap(haystack []pathAndSource, needle pathAndSource) []pathAndSource {
+	pathSeparator := string(os.PathSeparator)
+
+	if needle.path == "" {
+		return nil
+	}
+
+	var result []pathAndSource
+	for _, item := range haystack {
+		switch {
+		case item.path == "":
+			continue
+		case item == needle:
+			result = append(result, item)
+		case strings.HasPrefix(item.path+pathSeparator, needle.path+pathSeparator):
+			result = append(result, item)
+		case strings.HasPrefix(needle.path+pathSeparator, item.path+pathSeparator):
+			result = append(result, item)
+		}
+	}
+
+	return result
 }

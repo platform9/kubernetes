@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -40,9 +41,11 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	componentbaseconfig "k8s.io/component-base/config"
 	"k8s.io/component-base/config/options"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/component-base/metrics"
+	utilversion "k8s.io/component-base/version"
 	"k8s.io/klog/v2"
 	schedulerappconfig "k8s.io/kubernetes/cmd/kube-scheduler/app/config"
 	"k8s.io/kubernetes/pkg/scheduler"
@@ -72,12 +75,21 @@ type Options struct {
 
 	Master string
 
+	// ComponentGlobalsRegistry is the registry where the effective versions and feature gates for all components are stored.
+	ComponentGlobalsRegistry featuregate.ComponentGlobalsRegistry
+
 	// Flags hold the parsed CLI flags.
 	Flags *cliflag.NamedFlagSets
 }
 
 // NewOptions returns default scheduler app options.
 func NewOptions() *Options {
+	// make sure DefaultKubeComponent is registered in the DefaultComponentGlobalsRegistry.
+	if featuregate.DefaultComponentGlobalsRegistry.EffectiveVersionFor(featuregate.DefaultKubeComponent) == nil {
+		featureGate := utilfeature.DefaultMutableFeatureGate
+		effectiveVersion := utilversion.DefaultKubeEffectiveVersion()
+		utilruntime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(featuregate.DefaultKubeComponent, effectiveVersion, featureGate))
+	}
 	o := &Options{
 		SecureServing:  apiserveroptions.NewSecureServingOptions().WithLoopback(),
 		Authentication: apiserveroptions.NewDelegatingAuthenticationOptions(),
@@ -94,8 +106,9 @@ func NewOptions() *Options {
 			ResourceName:      "kube-scheduler",
 			ResourceNamespace: "kube-system",
 		},
-		Metrics: metrics.NewOptions(),
-		Logs:    logs.NewOptions(),
+		Metrics:                  metrics.NewOptions(),
+		Logs:                     logs.NewOptions(),
+		ComponentGlobalsRegistry: featuregate.DefaultComponentGlobalsRegistry,
 	}
 
 	o.Authentication.TolerateInClusterLookupFailure = true
@@ -189,7 +202,7 @@ func (o *Options) initFlags() {
 	o.Authorization.AddFlags(nfs.FlagSet("authorization"))
 	o.Deprecated.AddFlags(nfs.FlagSet("deprecated"))
 	options.BindLeaderElectionFlags(o.LeaderElection, nfs.FlagSet("leader election"))
-	utilfeature.DefaultMutableFeatureGate.AddFlag(nfs.FlagSet("feature gate"))
+	o.ComponentGlobalsRegistry.AddFlags(nfs.FlagSet("feature gate"))
 	o.Metrics.AddFlags(nfs.FlagSet("metrics"))
 	logsapi.AddFlags(o.Logs, nfs.FlagSet("logs"))
 
@@ -198,6 +211,9 @@ func (o *Options) initFlags() {
 
 // ApplyTo applies the scheduler options to the given scheduler app configuration.
 func (o *Options) ApplyTo(logger klog.Logger, c *schedulerappconfig.Config) error {
+	if err := o.ComponentGlobalsRegistry.SetFallback(); err != nil {
+		return err
+	}
 	if len(o.ConfigFile) == 0 {
 		// If the --config arg is not specified, honor the deprecated as well as leader election CLI args.
 		o.ApplyDeprecated()
@@ -251,7 +267,11 @@ func (o *Options) ApplyTo(logger klog.Logger, c *schedulerappconfig.Config) erro
 // Validate validates all the required options.
 func (o *Options) Validate() []error {
 	var errs []error
-
+	if err := o.ComponentGlobalsRegistry.SetFallback(); err != nil {
+		errs = append(errs, err)
+	} else {
+		errs = append(errs, o.ComponentGlobalsRegistry.Validate()...)
+	}
 	if err := validation.ValidateKubeSchedulerConfiguration(o.ComponentConfig); err != nil {
 		errs = append(errs, err.Errors()...)
 	}
@@ -259,6 +279,11 @@ func (o *Options) Validate() []error {
 	errs = append(errs, o.Authentication.Validate()...)
 	errs = append(errs, o.Authorization.Validate()...)
 	errs = append(errs, o.Metrics.Validate()...)
+
+	effectiveVersion := o.ComponentGlobalsRegistry.EffectiveVersionFor(featuregate.DefaultKubeComponent)
+	if err := utilversion.ValidateKubeEffectiveVersion(effectiveVersion); err != nil {
+		errs = append(errs, err)
+	}
 
 	return errs
 }

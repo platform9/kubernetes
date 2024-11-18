@@ -1658,6 +1658,7 @@ After=network-online.target
 [Service]
 Restart=always
 RestartSec=10
+WatchdogSec=30s
 EnvironmentFile=${kubelet_env_file}
 ExecStart=${kubelet_bin} \$KUBELET_OPTS
 
@@ -2223,9 +2224,6 @@ function start-kube-controller-manager {
   if [[ -n "${SERVICE_CLUSTER_IP_RANGE:-}" ]]; then
     params+=("--service-cluster-ip-range=${SERVICE_CLUSTER_IP_RANGE}")
   fi
-  if [[ -n "${CONCURRENT_SERVICE_SYNCS:-}" ]]; then
-    params+=("--concurrent-service-syncs=${CONCURRENT_SERVICE_SYNCS}")
-  fi
   if [[ "${NETWORK_PROVIDER:-}" == "kubenet" ]]; then
     params+=("--allocate-node-cidrs=true")
   elif [[ -n "${ALLOCATE_NODE_CIDRS:-}" ]]; then
@@ -2234,12 +2232,11 @@ function start-kube-controller-manager {
   if [[ -n "${TERMINATED_POD_GC_THRESHOLD:-}" ]]; then
     params+=("--terminated-pod-gc-threshold=${TERMINATED_POD_GC_THRESHOLD}")
   fi
-  if [[ "${ENABLE_IP_ALIASES:-}" == 'true' ]]; then
-    params+=("--cidr-allocator-type=${NODE_IPAM_MODE}")
-    params+=("--configure-cloud-routes=false")
-  fi
   if [[ -n "${FEATURE_GATES:-}" ]]; then
     params+=("--feature-gates=${FEATURE_GATES}")
+  fi
+  if [[ -n "${KUBE_EMULATED_VERSION:-}" ]]; then
+    params+=("--emulated-version=kube=${KUBE_EMULATED_VERSION}")
   fi
   if [[ -n "${VOLUME_PLUGIN_DIR:-}" ]]; then
     params+=("--flex-volume-plugin-dir=${VOLUME_PLUGIN_DIR}")
@@ -2453,6 +2450,9 @@ function start-kube-scheduler {
   params=("${SCHEDULER_TEST_LOG_LEVEL:-"--v=2"}" "${SCHEDULER_TEST_ARGS:-}")
   if [[ -n "${FEATURE_GATES:-}" ]]; then
     params+=("--feature-gates=${FEATURE_GATES}")
+  fi
+  if [[ -n "${KUBE_EMULATED_VERSION:-}" ]]; then
+    params+=("--emulated-version=kube=${KUBE_EMULATED_VERSION}")
   fi
 
   # Scheduler Component Config takes precedence over some flags.
@@ -2937,9 +2937,6 @@ EOF
     sed -i -e "s@{{ metrics_server_memory_per_node }}@${metrics_server_memory_per_node}@g" "${metrics_server_yaml}"
     sed -i -e "s@{{ metrics_server_min_cluster_size }}@${metrics_server_min_cluster_size}@g" "${metrics_server_yaml}"
   fi
-  if [[ "${ENABLE_NVIDIA_GPU_DEVICE_PLUGIN:-}" == "true" ]]; then
-    setup-addon-manifests "addons" "device-plugins/nvidia-gpu"
-  fi
   # Setting up the konnectivity-agent daemonset
   if [[ "${RUN_KONNECTIVITY_PODS:-false}" == "true" ]]; then
     setup-addon-manifests "addons" "konnectivity-agent"
@@ -3152,7 +3149,7 @@ Or you can download it at:
   https://storage.googleapis.com/gke-release/kubernetes/release/${version}/kubernetes-src.tar.gz
 
 It is based on the Kubernetes source at:
-  https://github.com/kubernetes/kubernetes/tree/${gitref}
+  https://github.com/kubernetes/kubernetes/tree/${gitref/-gke.*/}
 ${devel}
 For Kubernetes copyright and licensing information, see:
   /home/kubernetes/LICENSES
@@ -3208,7 +3205,7 @@ spec:
   - name: vol
   containers:
   - name: pv-recycler
-    image: registry.k8s.io/build-image/debian-base:bookworm-v1.0.3
+    image: registry.k8s.io/build-image/debian-base:bookworm-v1.0.4
     command:
     - /bin/sh
     args:
@@ -3309,15 +3306,31 @@ oom_score = -999
   default_runtime_name = "runc"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
-  endpoint = ["https://mirror.gcr.io","https://registry-1.docker.io"]
-# Enable registry.k8s.io as the primary mirror for k8s.gcr.io
-# See: https://github.com/kubernetes/k8s.io/issues/3411
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors."k8s.gcr.io"]
-  endpoint = ["https://registry.k8s.io", "https://k8s.gcr.io",]
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
   SystemdCgroup = ${systemdCgroup}
+# enable hosts config
+[plugins."io.containerd.grpc.v1.cri".registry]
+  config_path = "/etc/containerd/certs.d"
 EOF
+
+  # used for 5k node scale tests with private pull-through cache
+  if [[ -n "${KUBERNETES_REGISTRY_PULL_THROUGH_HOST:-}" ]]; then
+    registry_config_dir="/etc/containerd/certs.d/registry.k8s.io"
+    mkdir -p "${registry_config_dir}"
+    {
+      # NOTE: we need literal double quotes around some of these values
+      echo 'server="'"${KUBERNETES_REGISTRY_PULL_THROUGH_HOST}"'"'
+      echo ''
+      echo '[host."'"${KUBERNETES_REGISTRY_PULL_THROUGH_HOST}"'"]'
+      echo '  override_path = true'
+      echo '  capabilities = ["pull", "resolve"]'
+      # TODO: this is a hack. https://github.com/containerd/containerd/issues/7385
+      echo '[host."'"${KUBERNETES_REGISTRY_PULL_THROUGH_HOST}"'".header]'
+      if [[ -n "${KUBERNETES_REGISTRY_PULL_THROUGH_BASIC_AUTH_TOKEN:-}" ]]; then
+        echo "  authorization = '""${KUBERNETES_REGISTRY_PULL_THROUGH_BASIC_AUTH_TOKEN}""'"
+      fi
+    } > "${registry_config_dir}/hosts.toml"
+  fi
 
   if [[ "${CONTAINER_RUNTIME_TEST_HANDLER:-}" == "true" ]]; then
   cat >> "${config_path}" <<EOF

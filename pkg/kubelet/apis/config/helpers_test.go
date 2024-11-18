@@ -233,6 +233,7 @@ var (
 		"Logging.Options.Text.OutputRoutingOptions.SplitStream",
 		"Logging.VModule[*].FilePattern",
 		"Logging.VModule[*].Verbosity",
+		"SingleProcessOOMKill",
 		"Logging.Verbosity",
 		"TLSCipherSuites[*]",
 		"TLSMinVersion",
@@ -300,5 +301,7 @@ var (
 		"Tracing.Endpoint",
 		"Tracing.SamplingRatePerMillion",
 		"LocalStorageCapacityIsolation",
+		"FailCgroupV1",
+		"CrashLoopBackOff.MaxContainerRestartPeriod",
 	)
 )

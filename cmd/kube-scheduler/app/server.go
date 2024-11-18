@@ -24,8 +24,10 @@ import (
 	"os"
 	goruntime "runtime"
 
+	"github.com/blang/semver/v4"
 	"github.com/spf13/cobra"
-
+	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
@@ -45,17 +47,19 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/configz"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/component-base/metrics/features"
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/metrics/prometheus/slis"
 	"k8s.io/component-base/term"
-	"k8s.io/component-base/version"
+	utilversion "k8s.io/component-base/version"
 	"k8s.io/component-base/version/verflag"
 	"k8s.io/klog/v2"
 	schedulerserverconfig "k8s.io/kubernetes/cmd/kube-scheduler/app/config"
 	"k8s.io/kubernetes/cmd/kube-scheduler/app/options"
+	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler"
 	kubeschedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
@@ -74,6 +78,10 @@ type Option func(runtime.Registry) error
 
 // NewSchedulerCommand creates a *cobra.Command object with default parameters and registryOptions
 func NewSchedulerCommand(registryOptions ...Option) *cobra.Command {
+	// explicitly register (if not already registered) the kube effective version and feature gate in DefaultComponentGlobalsRegistry,
+	// which will be used in NewOptions.
+	_, _ = featuregate.DefaultComponentGlobalsRegistry.ComponentGlobalsOrRegister(
+		featuregate.DefaultKubeComponent, utilversion.DefaultBuildEffectiveVersion(), utilfeature.DefaultMutableFeatureGate)
 	opts := options.NewOptions()
 
 	cmd := &cobra.Command{
@@ -86,6 +94,10 @@ suitable Node. Multiple different schedulers may be used within a cluster;
 kube-scheduler is the reference implementation.
 See [scheduling](https://kubernetes.io/docs/concepts/scheduling-eviction/)
 for more information about scheduling and the kube-scheduler component.`,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			// makes sure feature gates are set before RunE.
+			return opts.ComponentGlobalsRegistry.Set()
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCommand(cmd, opts, registryOptions...)
 		},
@@ -120,10 +132,10 @@ for more information about scheduling and the kube-scheduler component.`,
 // runCommand runs the scheduler.
 func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Option) error {
 	verflag.PrintAndExitIfRequested()
-
+	fg := opts.ComponentGlobalsRegistry.FeatureGateFor(featuregate.DefaultKubeComponent)
 	// Activate logging as soon as possible, after that
 	// show flags with the final logging configuration.
-	if err := logsapi.ValidateAndApply(opts.Logs, utilfeature.DefaultFeatureGate); err != nil {
+	if err := logsapi.ValidateAndApply(opts.Logs, fg); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
@@ -142,7 +154,7 @@ func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Op
 		return err
 	}
 	// add feature enablement metrics
-	utilfeature.DefaultMutableFeatureGate.AddMetrics()
+	fg.(featuregate.MutableFeatureGate).AddMetrics()
 	return Run(ctx, cc, sched)
 }
 
@@ -151,15 +163,15 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 	logger := klog.FromContext(ctx)
 
 	// To help debugging, immediately log version
-	logger.Info("Starting Kubernetes Scheduler", "version", version.Get())
+	logger.Info("Starting Kubernetes Scheduler", "version", utilversion.Get())
 
 	logger.Info("Golang settings", "GOGC", os.Getenv("GOGC"), "GOMAXPROCS", os.Getenv("GOMAXPROCS"), "GOTRACEBACK", os.Getenv("GOTRACEBACK"))
 
 	// Configz registration.
-	if cz, err := configz.New("componentconfig"); err == nil {
-		cz.Set(cc.ComponentConfig)
-	} else {
+	if cz, err := configz.New("componentconfig"); err != nil {
 		return fmt.Errorf("unable to register configz: %s", err)
+	} else {
+		cz.Set(cc.ComponentConfig)
 	}
 
 	// Start events processing pipeline.
@@ -196,6 +208,33 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		return fmt.Errorf("waiting for handlers to sync")
 	})
 	readyzChecks = append(readyzChecks, handlerSyncCheck)
+
+	if cc.LeaderElection != nil && utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection) {
+		binaryVersion, err := semver.ParseTolerant(featuregate.DefaultComponentGlobalsRegistry.EffectiveVersionFor(featuregate.DefaultKubeComponent).BinaryVersion().String())
+		if err != nil {
+			return err
+		}
+		emulationVersion, err := semver.ParseTolerant(featuregate.DefaultComponentGlobalsRegistry.EffectiveVersionFor(featuregate.DefaultKubeComponent).EmulationVersion().String())
+		if err != nil {
+			return err
+		}
+
+		// Start lease candidate controller for coordinated leader election
+		leaseCandidate, waitForSync, err := leaderelection.NewCandidate(
+			cc.Client,
+			metav1.NamespaceSystem,
+			cc.LeaderElection.Lock.Identity(),
+			"kube-scheduler",
+			binaryVersion.FinalizeVersion(),
+			emulationVersion.FinalizeVersion(),
+			coordinationv1.OldestEmulationVersion,
+		)
+		if err != nil {
+			return err
+		}
+		readyzChecks = append(readyzChecks, healthz.NewInformerSyncHealthz(waitForSync))
+		go leaseCandidate.Run(ctx)
+	}
 
 	// Start up the healthz server.
 	if cc.SecureServing != nil {
@@ -235,6 +274,9 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 	}
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
 	if cc.LeaderElection != nil {
+		if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection) {
+			cc.LeaderElection.Coordinated = true
+		}
 		cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				close(waitingForLeader)

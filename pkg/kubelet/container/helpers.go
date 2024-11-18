@@ -46,7 +46,7 @@ type HandlerRunner interface {
 // RuntimeHelper wraps kubelet to make container runtime
 // able to get necessary informations like the RunContainerOptions, DNS settings, Host IP.
 type RuntimeHelper interface {
-	GenerateRunContainerOptions(ctx context.Context, pod *v1.Pod, container *v1.Container, podIP string, podIPs []string) (contOpts *RunContainerOptions, cleanupAction func(), err error)
+	GenerateRunContainerOptions(ctx context.Context, pod *v1.Pod, container *v1.Container, podIP string, podIPs []string, imageVolumes ImageVolumes) (contOpts *RunContainerOptions, cleanupAction func(), err error)
 	GetPodDNS(pod *v1.Pod) (dnsConfig *runtimeapi.DNSConfig, err error)
 	// GetPodCgroupParent returns the CgroupName identifier, and its literal cgroupfs form on the host
 	// of a pod.
@@ -62,10 +62,13 @@ type RuntimeHelper interface {
 	GetOrCreateUserNamespaceMappings(pod *v1.Pod, runtimeHandler string) (*runtimeapi.UserNamespace, error)
 
 	// PrepareDynamicResources prepares resources for a pod.
-	PrepareDynamicResources(pod *v1.Pod) error
+	PrepareDynamicResources(ctx context.Context, pod *v1.Pod) error
 
 	// UnprepareDynamicResources unprepares resources for a a pod.
-	UnprepareDynamicResources(pod *v1.Pod) error
+	UnprepareDynamicResources(ctx context.Context, pod *v1.Pod) error
+
+	// SetPodWatchCondition flags a pod to be inspected until the condition is met.
+	SetPodWatchCondition(types.UID, string, func(*PodStatus) bool)
 }
 
 // ShouldContainerBeRestarted checks whether a container needs to be restarted.

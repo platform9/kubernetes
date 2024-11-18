@@ -526,6 +526,10 @@
                   "volumeAttributesClassName": "volumeAttributesClassNameValue"
                 }
               }
+            },
+            "image": {
+              "reference": "referenceValue",
+              "pullPolicy": "pullPolicyValue"
             }
           }
         ],
@@ -598,7 +602,8 @@
               },
               "claims": [
                 {
-                  "name": "nameValue"
+                  "name": "nameValue",
+                  "request": "requestValue"
                 }
               ]
             },
@@ -893,7 +898,8 @@
               },
               "claims": [
                 {
-                  "name": "nameValue"
+                  "name": "nameValue",
+                  "request": "requestValue"
                 }
               ]
             },
@@ -1188,7 +1194,8 @@
               },
               "claims": [
                 {
-                  "name": "nameValue"
+                  "name": "nameValue",
+                  "request": "requestValue"
                 }
               ]
             },
@@ -1465,7 +1472,8 @@
           "appArmorProfile": {
             "type": "typeValue",
             "localhostProfile": "localhostProfileValue"
-          }
+          },
+          "seLinuxChangePolicy": "seLinuxChangePolicyValue"
         },
         "imagePullSecrets": [
           {
@@ -1790,12 +1798,24 @@
         "resourceClaims": [
           {
             "name": "nameValue",
-            "source": {
-              "resourceClaimName": "resourceClaimNameValue",
-              "resourceClaimTemplateName": "resourceClaimTemplateNameValue"
-            }
+            "resourceClaimName": "resourceClaimNameValue",
+            "resourceClaimTemplateName": "resourceClaimTemplateNameValue"
           }
-        ]
+        ],
+        "resources": {
+          "limits": {
+            "limitsKey": "0"
+          },
+          "requests": {
+            "requestsKey": "0"
+          },
+          "claims": [
+            {
+              "name": "nameValue",
+              "request": "requestValue"
+            }
+          ]
+        }
       }
     },
     "ttlSecondsAfterFinished": 8,

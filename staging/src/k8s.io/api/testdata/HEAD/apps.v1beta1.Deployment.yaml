@@ -348,6 +348,7 @@ spec:
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
@@ -563,6 +564,7 @@ spec:
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
@@ -780,6 +782,7 @@ spec:
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
@@ -869,9 +872,16 @@ spec:
       - conditionType: conditionTypeValue
       resourceClaims:
       - name: nameValue
-        source:
-          resourceClaimName: resourceClaimNameValue
-          resourceClaimTemplateName: resourceClaimTemplateNameValue
+        resourceClaimName: resourceClaimNameValue
+        resourceClaimTemplateName: resourceClaimTemplateNameValue
+      resources:
+        claims:
+        - name: nameValue
+          request: requestValue
+        limits:
+          limitsKey: "0"
+        requests:
+          requestsKey: "0"
       restartPolicy: restartPolicyValue
       runtimeClassName: runtimeClassNameValue
       schedulerName: schedulerNameValue
@@ -886,6 +896,7 @@ spec:
         runAsGroup: 6
         runAsNonRoot: true
         runAsUser: 2
+        seLinuxChangePolicy: seLinuxChangePolicyValue
         seLinuxOptions:
           level: levelValue
           role: roleValue
@@ -1095,6 +1106,9 @@ spec:
         hostPath:
           path: pathValue
           type: typeValue
+        image:
+          pullPolicy: pullPolicyValue
+          reference: referenceValue
         iscsi:
           chapAuthDiscovery: true
           chapAuthSession: true

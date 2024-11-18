@@ -58,6 +58,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // NewFakeControllerExpectationsLookup creates a fake store for PodExpectations.
@@ -183,7 +184,7 @@ func TestControllerExpectations(t *testing.T) {
 
 	// RC fires off adds and deletes at apiserver, then sets expectations
 	rcKey, err := KeyFunc(rc)
-	assert.NoError(t, err, "Couldn't get key for object %#v: %v", rc, err)
+	require.NoError(t, err, "Couldn't get key for object %#v: %v", rc, err)
 
 	e.SetExpectations(logger, rcKey, adds, dels)
 	var wg sync.WaitGroup
@@ -238,7 +239,7 @@ func TestControllerExpectations(t *testing.T) {
 				e.SetExpectations(logger, rcKey, test.expectationsToSet[0], test.expectationsToSet[1])
 			}
 			podExp, exists, err := e.GetExpectations(rcKey)
-			assert.NoError(t, err, "Could not get expectations for rc, exists %v and err %v", exists, err)
+			require.NoError(t, err, "Could not get expectations for rc, exists %v and err %v", exists, err)
 			assert.True(t, exists, "Could not get expectations for rc, exists %v and err %v", exists, err)
 
 			add, del := podExp.GetExpectations()
@@ -374,7 +375,7 @@ func TestCreatePodsWithGenerateName(t *testing.T) {
 			}
 			testServer := httptest.NewServer(&fakeHandler)
 			defer testServer.Close()
-			clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: testServer.URL, ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
+			clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: testServer.URL, ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}, ContentType: runtime.ContentTypeJSON}})
 
 			podControl := RealPodControl{
 				KubeClient: clientset,
@@ -382,12 +383,12 @@ func TestCreatePodsWithGenerateName(t *testing.T) {
 			}
 
 			err := test.podCreationFunc(podControl)
-			assert.NoError(t, err, "unexpected error: %v", err)
+			require.NoError(t, err, "unexpected error: %v", err)
 
 			fakeHandler.ValidateRequest(t, "/api/v1/namespaces/default/pods", "POST", nil)
 			var actualPod = &v1.Pod{}
 			err = json.Unmarshal([]byte(fakeHandler.RequestBody), actualPod)
-			assert.NoError(t, err, "unexpected error: %v", err)
+			require.NoError(t, err, "unexpected error: %v", err)
 			assert.True(t, apiequality.Semantic.DeepDerivative(test.wantPod, actualPod),
 				"Body: %s", fakeHandler.RequestBody)
 		})
@@ -426,10 +427,10 @@ func TestCountTerminatingPods(t *testing.T) {
 
 	terminatingPods := CountTerminatingPods(podPointers)
 
-	assert.Equal(t, terminatingPods, int32(2))
+	assert.Equal(t, int32(2), terminatingPods)
 
 	terminatingList := FilterTerminatingPods(podPointers)
-	assert.Equal(t, len(terminatingList), int(2))
+	assert.Len(t, terminatingList, int(2))
 }
 
 func TestActivePodFiltering(t *testing.T) {
@@ -490,6 +491,7 @@ func TestSortingActivePods(t *testing.T) {
 	now := metav1.Now()
 	then := metav1.Time{Time: now.AddDate(0, -1, 0)}
 
+	restartAlways := v1.ContainerRestartPolicyAlways
 	tests := []struct {
 		name      string
 		pods      []v1.Pod
@@ -546,6 +548,22 @@ func TestSortingActivePods(t *testing.T) {
 					},
 				},
 				{
+					ObjectMeta: metav1.ObjectMeta{Name: "lowerSidecarContainerRestartCount", CreationTimestamp: now},
+					Spec: v1.PodSpec{
+						NodeName: "foo",
+						InitContainers: []v1.Container{{
+							Name:          "sidecar",
+							RestartPolicy: &restartAlways,
+						}},
+					},
+					Status: v1.PodStatus{
+						Phase:                 v1.PodRunning,
+						Conditions:            []v1.PodCondition{{Type: v1.PodReady, Status: v1.ConditionTrue, LastTransitionTime: then}},
+						ContainerStatuses:     []v1.ContainerStatus{{RestartCount: 2}, {RestartCount: 1}},
+						InitContainerStatuses: []v1.ContainerStatus{{Name: "sidecar", RestartCount: 2}},
+					},
+				},
+				{
 					ObjectMeta: metav1.ObjectMeta{Name: "lowerContainerRestartCount", CreationTimestamp: now},
 					Spec:       v1.PodSpec{NodeName: "foo"},
 					Status: v1.PodStatus{
@@ -572,6 +590,7 @@ func TestSortingActivePods(t *testing.T) {
 				"runningNoLastTransitionTime",
 				"runningWithLastTransitionTime",
 				"runningLongerTime",
+				"lowerSidecarContainerRestartCount",
 				"lowerContainerRestartCount",
 				"oldest",
 			},
@@ -610,12 +629,15 @@ func TestSortingActivePodsWithRanks(t *testing.T) {
 	then5Hours := metav1.Time{Time: now.Add(-5 * time.Hour)}
 	then8Hours := metav1.Time{Time: now.Add(-8 * time.Hour)}
 	zeroTime := metav1.Time{}
-	pod := func(podName, nodeName string, phase v1.PodPhase, ready bool, restarts int32, readySince metav1.Time, created metav1.Time, annotations map[string]string) *v1.Pod {
+	restartAlways := v1.ContainerRestartPolicyAlways
+	pod := func(podName, nodeName string, phase v1.PodPhase, ready bool, restarts int32, sideRestarts int32, readySince metav1.Time, created metav1.Time, annotations map[string]string) *v1.Pod {
 		var conditions []v1.PodCondition
 		var containerStatuses []v1.ContainerStatus
+		var initContainerStatuses []v1.ContainerStatus
 		if ready {
 			conditions = []v1.PodCondition{{Type: v1.PodReady, Status: v1.ConditionTrue, LastTransitionTime: readySince}}
 			containerStatuses = []v1.ContainerStatus{{RestartCount: restarts}}
+			initContainerStatuses = []v1.ContainerStatus{{Name: "sidecar", RestartCount: sideRestarts}}
 		}
 		return &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -623,31 +645,36 @@ func TestSortingActivePodsWithRanks(t *testing.T) {
 				Name:              podName,
 				Annotations:       annotations,
 			},
-			Spec: v1.PodSpec{NodeName: nodeName},
+			Spec: v1.PodSpec{
+				NodeName:       nodeName,
+				InitContainers: []v1.Container{{Name: "sidecar", RestartPolicy: &restartAlways}},
+			},
 			Status: v1.PodStatus{
-				Conditions:        conditions,
-				ContainerStatuses: containerStatuses,
-				Phase:             phase,
+				Conditions:            conditions,
+				ContainerStatuses:     containerStatuses,
+				InitContainerStatuses: initContainerStatuses,
+				Phase:                 phase,
 			},
 		}
 	}
 	var (
-		unscheduledPod                      = pod("unscheduled", "", v1.PodPending, false, 0, zeroTime, zeroTime, nil)
-		scheduledPendingPod                 = pod("pending", "node", v1.PodPending, false, 0, zeroTime, zeroTime, nil)
-		unknownPhasePod                     = pod("unknown-phase", "node", v1.PodUnknown, false, 0, zeroTime, zeroTime, nil)
-		runningNotReadyPod                  = pod("not-ready", "node", v1.PodRunning, false, 0, zeroTime, zeroTime, nil)
-		runningReadyNoLastTransitionTimePod = pod("ready-no-last-transition-time", "node", v1.PodRunning, true, 0, zeroTime, zeroTime, nil)
-		runningReadyNow                     = pod("ready-now", "node", v1.PodRunning, true, 0, now, now, nil)
-		runningReadyThen                    = pod("ready-then", "node", v1.PodRunning, true, 0, then1Month, then1Month, nil)
-		runningReadyNowHighRestarts         = pod("ready-high-restarts", "node", v1.PodRunning, true, 9001, now, now, nil)
-		runningReadyNowCreatedThen          = pod("ready-now-created-then", "node", v1.PodRunning, true, 0, now, then1Month, nil)
-		lowPodDeletionCost                  = pod("low-deletion-cost", "node", v1.PodRunning, true, 0, now, then1Month, map[string]string{core.PodDeletionCost: "10"})
-		highPodDeletionCost                 = pod("high-deletion-cost", "node", v1.PodRunning, true, 0, now, then1Month, map[string]string{core.PodDeletionCost: "100"})
-		unscheduled5Hours                   = pod("unscheduled-5-hours", "", v1.PodPending, false, 0, then5Hours, then5Hours, nil)
-		unscheduled8Hours                   = pod("unscheduled-10-hours", "", v1.PodPending, false, 0, then8Hours, then8Hours, nil)
-		ready2Hours                         = pod("ready-2-hours", "", v1.PodRunning, true, 0, then2Hours, then1Month, nil)
-		ready5Hours                         = pod("ready-5-hours", "", v1.PodRunning, true, 0, then5Hours, then1Month, nil)
-		ready10Hours                        = pod("ready-10-hours", "", v1.PodRunning, true, 0, then8Hours, then1Month, nil)
+		unscheduledPod                      = pod("unscheduled", "", v1.PodPending, false, 0, 0, zeroTime, zeroTime, nil)
+		scheduledPendingPod                 = pod("pending", "node", v1.PodPending, false, 0, 0, zeroTime, zeroTime, nil)
+		unknownPhasePod                     = pod("unknown-phase", "node", v1.PodUnknown, false, 0, 0, zeroTime, zeroTime, nil)
+		runningNotReadyPod                  = pod("not-ready", "node", v1.PodRunning, false, 0, 0, zeroTime, zeroTime, nil)
+		runningReadyNoLastTransitionTimePod = pod("ready-no-last-transition-time", "node", v1.PodRunning, true, 0, 0, zeroTime, zeroTime, nil)
+		runningReadyNow                     = pod("ready-now", "node", v1.PodRunning, true, 0, 0, now, now, nil)
+		runningReadyThen                    = pod("ready-then", "node", v1.PodRunning, true, 0, 0, then1Month, then1Month, nil)
+		runningReadyNowHighRestarts         = pod("ready-high-restarts", "node", v1.PodRunning, true, 9001, 0, now, now, nil)
+		runningReadyNowHighSideRestarts     = pod("ready-high-restarts", "node", v1.PodRunning, true, 9001, 9001, now, now, nil)
+		runningReadyNowCreatedThen          = pod("ready-now-created-then", "node", v1.PodRunning, true, 0, 0, now, then1Month, nil)
+		lowPodDeletionCost                  = pod("low-deletion-cost", "node", v1.PodRunning, true, 0, 0, now, then1Month, map[string]string{core.PodDeletionCost: "10"})
+		highPodDeletionCost                 = pod("high-deletion-cost", "node", v1.PodRunning, true, 0, 0, now, then1Month, map[string]string{core.PodDeletionCost: "100"})
+		unscheduled5Hours                   = pod("unscheduled-5-hours", "", v1.PodPending, false, 0, 0, then5Hours, then5Hours, nil)
+		unscheduled8Hours                   = pod("unscheduled-10-hours", "", v1.PodPending, false, 0, 0, then8Hours, then8Hours, nil)
+		ready2Hours                         = pod("ready-2-hours", "", v1.PodRunning, true, 0, 0, then2Hours, then1Month, nil)
+		ready5Hours                         = pod("ready-5-hours", "", v1.PodRunning, true, 0, 0, then5Hours, then1Month, nil)
+		ready10Hours                        = pod("ready-10-hours", "", v1.PodRunning, true, 0, 0, then8Hours, then1Month, nil)
 	)
 	equalityTests := []struct {
 		p1                          *v1.Pod
@@ -702,6 +729,7 @@ func TestSortingActivePodsWithRanks(t *testing.T) {
 		{lesser: podWithRank{runningReadyNow, 1}, greater: podWithRank{runningReadyThen, 1}},
 		{lesser: podWithRank{runningReadyNow, 2}, greater: podWithRank{runningReadyThen, 1}},
 		{lesser: podWithRank{runningReadyNowHighRestarts, 1}, greater: podWithRank{runningReadyNow, 1}},
+		{lesser: podWithRank{runningReadyNowHighSideRestarts, 1}, greater: podWithRank{runningReadyNowHighRestarts, 1}},
 		{lesser: podWithRank{runningReadyNow, 2}, greater: podWithRank{runningReadyNowHighRestarts, 1}},
 		{lesser: podWithRank{runningReadyNow, 1}, greater: podWithRank{runningReadyNowCreatedThen, 1}},
 		{lesser: podWithRank{runningReadyNowCreatedThen, 2}, greater: podWithRank{runningReadyNow, 1}},
@@ -957,7 +985,7 @@ func TestRemoveTaintOffNode(t *testing.T) {
 	for _, test := range tests {
 		node, _ := test.nodeHandler.Get(context.TODO(), test.nodeName, metav1.GetOptions{})
 		err := RemoveTaintOffNode(context.TODO(), test.nodeHandler, test.nodeName, node, test.taintsToRemove...)
-		assert.NoError(t, err, "%s: RemoveTaintOffNode() error = %v", test.name, err)
+		require.NoError(t, err, "%s: RemoveTaintOffNode() error = %v", test.name, err)
 
 		node, _ = test.nodeHandler.Get(context.TODO(), test.nodeName, metav1.GetOptions{})
 		assert.EqualValues(t, test.expectedTaints, node.Spec.Taints,
@@ -1196,7 +1224,7 @@ func TestAddOrUpdateTaintOnNode(t *testing.T) {
 			assert.Equal(t, test.expectedErr, err, "AddOrUpdateTaintOnNode get unexpected error")
 			continue
 		}
-		assert.NoError(t, err, "%s: AddOrUpdateTaintOnNode() error = %v", test.name, err)
+		require.NoError(t, err, "%s: AddOrUpdateTaintOnNode() error = %v", test.name, err)
 
 		node, _ := test.nodeHandler.Get(context.TODO(), test.nodeName, metav1.GetOptions{})
 		assert.EqualValues(t, test.expectedTaints, node.Spec.Taints,

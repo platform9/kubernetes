@@ -19,6 +19,7 @@ package eviction
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -33,8 +34,8 @@ import (
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	"k8s.io/utils/clock"
 
+	resourcehelper "k8s.io/component-helpers/resource"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	resourcehelper "k8s.io/kubernetes/pkg/api/v1/resource"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	"k8s.io/kubernetes/pkg/features"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
@@ -172,8 +173,6 @@ func (m *managerImpl) Admit(attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAd
 		}
 	}
 
-	// reject pods when under memory pressure (if pod is best effort), or if under disk pressure.
-	klog.InfoS("Failed to admit pod to node", "pod", klog.KObj(attrs.Pod), "nodeCondition", m.nodeConditions)
 	return lifecycle.PodAdmitResult{
 		Admit:   false,
 		Reason:  Reason,
@@ -187,7 +186,8 @@ func (m *managerImpl) Start(diskInfoProvider DiskInfoProvider, podFunc ActivePod
 		klog.InfoS(message)
 		m.synchronize(diskInfoProvider, podFunc)
 	}
-	if m.config.KernelMemcgNotification {
+	klog.InfoS("Eviction manager: starting control loop")
+	if m.config.KernelMemcgNotification || runtime.GOOS == "windows" {
 		for _, threshold := range m.config.Thresholds {
 			if threshold.Signal == evictionapi.SignalMemoryAvailable || threshold.Signal == evictionapi.SignalAllocatableMemoryAvailable {
 				notifier, err := NewMemoryThresholdNotifier(threshold, m.config.PodCgroupRoot, &CgroupNotifierFactory{}, thresholdHandler)
@@ -252,13 +252,20 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 	// build the ranking functions (if not yet known)
 	// TODO: have a function in cadvisor that lets us know if global housekeeping has completed
 	if m.dedicatedImageFs == nil {
-		hasImageFs, splitDiskError := diskInfoProvider.HasDedicatedImageFs(ctx)
-		if splitDiskError != nil {
-			klog.ErrorS(splitDiskError, "Eviction manager: failed to get HasDedicatedImageFs")
-			return nil, fmt.Errorf("eviction manager: failed to get HasDedicatedImageFs: %v", splitDiskError)
+		hasImageFs, imageFsErr := diskInfoProvider.HasDedicatedImageFs(ctx)
+		if imageFsErr != nil {
+			// TODO: This should be refactored to log an error and retry the HasDedicatedImageFs
+			// If we have a transient error this will never be retried and we will not set eviction signals
+			klog.ErrorS(imageFsErr, "Eviction manager: failed to get HasDedicatedImageFs")
+			return nil, fmt.Errorf("eviction manager: failed to get HasDedicatedImageFs: %w", imageFsErr)
 		}
 		m.dedicatedImageFs = &hasImageFs
-		splitContainerImageFs := m.containerGC.IsContainerFsSeparateFromImageFs(ctx)
+		splitContainerImageFs, splitErr := diskInfoProvider.HasDedicatedContainerFs(ctx)
+		if splitErr != nil {
+			// A common error case is when there is no split filesystem
+			// there is an error finding the split filesystem label and we want to ignore these errors
+			klog.ErrorS(splitErr, "eviction manager: failed to check if we have separate container filesystem. Ignoring.")
+		}
 
 		// If we are a split filesystem but the feature is turned off
 		// we should return an error.
@@ -411,16 +418,17 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 		gracePeriodOverride := int64(immediateEvictionGracePeriodSeconds)
 		if !isHardEvictionThreshold(thresholdToReclaim) {
 			gracePeriodOverride = m.config.MaxPodGracePeriodSeconds
-		}
-		message, annotations := evictionMessage(resourceToReclaim, pod, statsFunc, thresholds, observations)
-		var condition *v1.PodCondition
-		if utilfeature.DefaultFeatureGate.Enabled(features.PodDisruptionConditions) {
-			condition = &v1.PodCondition{
-				Type:    v1.DisruptionTarget,
-				Status:  v1.ConditionTrue,
-				Reason:  v1.PodReasonTerminationByKubelet,
-				Message: message,
+			if pod.Spec.TerminationGracePeriodSeconds != nil && !utilfeature.DefaultFeatureGate.Enabled(features.AllowOverwriteTerminationGracePeriodSeconds) {
+				gracePeriodOverride = min(m.config.MaxPodGracePeriodSeconds, *pod.Spec.TerminationGracePeriodSeconds)
 			}
+		}
+
+		message, annotations := evictionMessage(resourceToReclaim, pod, statsFunc, thresholds, observations)
+		condition := &v1.PodCondition{
+			Type:    v1.DisruptionTarget,
+			Status:  v1.ConditionTrue,
+			Reason:  v1.PodReasonTerminationByKubelet,
+			Message: message,
 		}
 		if m.evictPod(pod, gracePeriodOverride, message, annotations, condition) {
 			metrics.Evictions.WithLabelValues(string(thresholdToReclaim.Signal)).Inc()

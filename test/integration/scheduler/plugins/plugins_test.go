@@ -537,7 +537,7 @@ func (pp *PostFilterPlugin) Name() string {
 	return pp.name
 }
 
-func (pp *PostFilterPlugin) PostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, _ framework.NodeToStatusMap) (*framework.PostFilterResult, *framework.Status) {
+func (pp *PostFilterPlugin) PostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, _ framework.NodeToStatusReader) (*framework.PostFilterResult, *framework.Status) {
 	pp.numPostFilterCalled++
 	nodeInfos, err := pp.fh.SnapshotSharedLister().NodeInfos().List()
 	if err != nil {
@@ -1691,7 +1691,7 @@ func TestBindPlugin(t *testing.T) {
 				if err = testutils.WaitForPodToSchedule(testCtx.ClientSet, pod); err != nil {
 					t.Fatalf("Expected the pod to be scheduled. error: %v", err)
 				}
-				pod, err = testCtx.ClientSet.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+				pod, err = testCtx.ClientSet.CoreV1().Pods(pod.Namespace).Get(testCtx.Ctx, pod.Name, metav1.GetOptions{})
 				if err != nil {
 					t.Errorf("can't get pod: %v", err)
 				}
@@ -2571,7 +2571,7 @@ func TestActivatePods(t *testing.T) {
 		name := fmt.Sprintf("executor-%v", i)
 		executor := st.MakePod().Name(name).Namespace(ns).Label("executor", "").Container(pause).Obj()
 		pods = append(pods, executor)
-		if _, err := cs.CoreV1().Pods(executor.Namespace).Create(context.TODO(), executor, metav1.CreateOptions{}); err != nil {
+		if _, err := cs.CoreV1().Pods(executor.Namespace).Create(testCtx.Ctx, executor, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("Failed to create pod %v: %v", executor.Name, err)
 		}
 	}
@@ -2586,7 +2586,7 @@ func TestActivatePods(t *testing.T) {
 	// Create a driver pod.
 	driver := st.MakePod().Name("driver").Namespace(ns).Label("driver", "").Container(pause).Obj()
 	pods = append(pods, driver)
-	if _, err := cs.CoreV1().Pods(driver.Namespace).Create(context.TODO(), driver, metav1.CreateOptions{}); err != nil {
+	if _, err := cs.CoreV1().Pods(driver.Namespace).Create(testCtx.Ctx, driver, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("Failed to create pod %v: %v", driver.Name, err)
 	}
 
@@ -2627,10 +2627,10 @@ func (pl *SchedulingGatesPluginWithEvents) PreEnqueue(ctx context.Context, p *v1
 	return pl.SchedulingGates.PreEnqueue(ctx, p)
 }
 
-func (pl *SchedulingGatesPluginWithEvents) EventsToRegister() []framework.ClusterEventWithHint {
+func (pl *SchedulingGatesPluginWithEvents) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
 	return []framework.ClusterEventWithHint{
 		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.Update}},
-	}
+	}, nil
 }
 
 type SchedulingGatesPluginWOEvents struct {
@@ -2647,8 +2647,8 @@ func (pl *SchedulingGatesPluginWOEvents) PreEnqueue(ctx context.Context, p *v1.P
 	return pl.SchedulingGates.PreEnqueue(ctx, p)
 }
 
-func (pl *SchedulingGatesPluginWOEvents) EventsToRegister() []framework.ClusterEventWithHint {
-	return nil
+func (pl *SchedulingGatesPluginWOEvents) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
+	return nil, nil
 }
 
 // This test helps to verify registering nil events for PreEnqueue plugin works as expected.

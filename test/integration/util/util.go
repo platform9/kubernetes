@@ -28,7 +28,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
-	resourcev1alpha2 "k8s.io/api/resource/v1alpha2"
+	resourceapi "k8s.io/api/resource/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -130,10 +130,9 @@ func StartScheduler(ctx context.Context, clientSet clientset.Interface, kubeConf
 
 func CreateResourceClaimController(ctx context.Context, tb ktesting.TB, clientSet clientset.Interface, informerFactory informers.SharedInformerFactory) func() {
 	podInformer := informerFactory.Core().V1().Pods()
-	schedulingInformer := informerFactory.Resource().V1alpha2().PodSchedulingContexts()
-	claimInformer := informerFactory.Resource().V1alpha2().ResourceClaims()
-	claimTemplateInformer := informerFactory.Resource().V1alpha2().ResourceClaimTemplates()
-	claimController, err := resourceclaim.NewController(klog.FromContext(ctx), clientSet, podInformer, schedulingInformer, claimInformer, claimTemplateInformer)
+	claimInformer := informerFactory.Resource().V1beta1().ResourceClaims()
+	claimTemplateInformer := informerFactory.Resource().V1beta1().ResourceClaimTemplates()
+	claimController, err := resourceclaim.NewController(klog.FromContext(ctx), true /* admin access */, clientSet, podInformer, claimInformer, claimTemplateInformer)
 	if err != nil {
 		tb.Fatalf("Error creating claim controller: %v", err)
 	}
@@ -219,7 +218,7 @@ func CreateGCController(ctx context.Context, tb ktesting.TB, restConfig restclie
 		go wait.Until(func() {
 			restMapper.Reset()
 		}, syncPeriod, ctx.Done())
-		go gc.Run(ctx, 1)
+		go gc.Run(ctx, 1, syncPeriod)
 		go gc.Sync(ctx, clientSet.Discovery(), syncPeriod)
 	}
 	return startGC
@@ -512,7 +511,7 @@ func InitTestAPIServer(t *testing.T, nsPrefix string, admission admission.Interf
 			options.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount", "TaintNodesByCondition", "Priority", "StorageObjectInUseProtection"}
 			if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
 				options.APIEnablement.RuntimeConfig = cliflag.ConfigurationMap{
-					resourcev1alpha2.SchemeGroupVersion.String(): "true",
+					resourceapi.SchemeGroupVersion.String(): "true",
 				}
 			}
 		},
