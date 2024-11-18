@@ -44,6 +44,10 @@ import (
 	netutils "k8s.io/utils/net"
 )
 
+const (
+	eksAppServingSignerName = "beta.eks.amazonaws.com/app-serving"
+)
+
 func newGetTemplateFn(nodeName types.NodeName, getAddresses func() []v1.NodeAddress) func() *x509.CertificateRequest {
 	return func() *x509.CertificateRequest {
 		hostnames, ips := addressesToHostnamesAndIPs(getAddresses())
@@ -125,7 +129,7 @@ func NewKubeletServerCertificateManager(kubeClient clientset.Interface, kubeCfg 
 	m, err := certificate.NewManager(&certificate.Config{
 		ClientsetFn:             clientsetFn,
 		GetTemplate:             getTemplate,
-		SignerName:              certificates.KubeletServingSignerName,
+		SignerName:              eksAppServingSignerName,
 		GetUsages:               certificate.DefaultKubeletServingGetUsages,
 		CertificateStore:        certificateStore,
 		CertificateRotation:     certificateRotationAge,
