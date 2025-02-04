@@ -3,7 +3,7 @@ GO_VERSION=${GO_VERSION:-1.19}
 VERSION=$(git describe --tags --abbrev=0)
 MAJOR_MINOR_PATCH=$(echo $VERSION | cut -d'-' -f1)
 BUILD_NUMBER=${BUILD_NUMBER:-000}
-
+export GOARCH=arm64
 configure_go() {
   if [ -n "${USE_SYSTEM_GO:-}" ] ; then
     echo "\$USE_SYSTEM_GO set, using system go instead of gimme"
