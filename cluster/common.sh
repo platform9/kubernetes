@@ -331,7 +331,7 @@ function find-tar() {
 #   KUBE_MANIFESTS_TAR
 function find-release-tars() {
   # Use first item in KUBE_BUILD_PLATFORMS as server platform
-  KUBE_BUILD_PLATFORMS=${KUBE_BUILD_PLATFORMS:-"linux/amd64"}
+  KUBE_BUILD_PLATFORMS=${KUBE_BUILD_PLATFORMS:-"linux/arm64"}
   SERVER_PLATFORM=$(cut -d' ' -f1 <<< "${KUBE_BUILD_PLATFORMS}")
   OS=$(cut -d'/' -f1 <<< "${SERVER_PLATFORM}")
   ARCH=$(cut -d'/' -f2 <<< "${SERVER_PLATFORM}")
