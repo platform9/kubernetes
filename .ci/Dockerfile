@@ -54,4 +54,4 @@ RUN chmod +x .ci/build.sh
 EXPOSE 8080
 
 # Set the default command to run your build script and then upload to S3
-CMD /bin/bash -c "./.ci/build.sh && aws s3 cp _output/local/bin/linux/arm64/kubelet s3://emp-kubelet/$TEAMCITY_BUILD_BRANCH/kubelet-$TEAMCITY_BUILD_BRANCH-$BUILD_NUMBER"
+CMD /bin/bash -c "./.ci/build.sh && aws s3 cp _output/local/bin/linux/arm64/kubelet s3://emp-kubelet/$TEAMCITY_BUILD_BRANCH/arm64/kubelet-$TEAMCITY_BUILD_BRANCH-$BUILD_NUMBER"
