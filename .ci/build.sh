@@ -18,4 +18,4 @@ configure_go() {
 
 configure_go
 
-make WHAT=cmd/kubelet KUBE_GIT_VERSION=$MAJOR_MINOR_PATCH-emp.$BUILD_NUMBER KUBE_GIT_COMMIT=$(git rev-parse HEAD) KUBE_GIT_TREE_STATE="clean" GOFLAGS=-v
+make WHAT=cmd/kubelet KUBE_BUILD_PLATFORMS=linux/arm64 KUBE_GIT_VERSION=$MAJOR_MINOR_PATCH-emp.$BUILD_NUMBER KUBE_GIT_COMMIT=$(git rev-parse HEAD) KUBE_GIT_TREE_STATE="clean" GOFLAGS=-v
